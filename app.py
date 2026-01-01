@@ -873,7 +873,7 @@ with col_left:
             )
 
 with col_right:
-    st.subheader("압구정 매물 검색색""
+    st.subheader("압구정 매물 검색")
 
     # (A) 평형대 버튼: 20,30,40...
     c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 1, 1.2])
