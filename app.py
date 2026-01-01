@@ -213,8 +213,55 @@ def get_spreadsheet_id() -> str:
     if env:
         return extract_spreadsheet_id(env)
 
-    # 공개 레포에는 기본값을 두지 않는 것을 권장
     raise RuntimeError("SPREADSHEET_ID가 설정되지 않았습니다. Secrets 또는 환경변수를 설정하세요.")
+
+
+def _repair_private_key_multiline_json(raw: str) -> str:
+    """
+    사용자가 Streamlit Secrets에 JSON을 그대로 붙여넣을 때 가장 많이 하는 실수:
+    - private_key 문자열 내부에 실제 줄바꿈이 들어감 (JSON 문법 위반)
+
+    이 함수는 private_key 값 구간의 실제 줄바꿈을 \\n으로 치환해 JSON을 복구합니다.
+    """
+    s = raw.strip()
+
+    # private_key 시작/끝을 최대한 안전하게 찾기
+    m = re.search(r'"private_key"\s*:\s*"', s)
+    if not m:
+        return s
+
+    start = m.end()  # value 시작 위치
+    # value 종료는 다음 따옴표 + 쉼표 패턴을 찾되, BEGIN/END를 고려해 가장 먼저 나오는 ", 를 사용
+    end_match = re.search(r'"\s*,\s*"\s*client_email"\s*:', s[start:])
+    if not end_match:
+        # client_email 앞을 못 찾으면 일반적으로 ", 다음 키 패턴으로 종료
+        end_match = re.search(r'"\s*,\s*"[a-zA-Z0-9_]+"\\s*:', s[start:])
+        if not end_match:
+            return s
+
+    end = start + end_match.start()
+    pk = s[start:end]
+
+    # 실제 개행을 JSON 이스케이프 \\n으로 변환
+    pk2 = pk.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+
+    return s[:start] + pk2 + s[end:]
+
+
+def parse_service_account_json(value: str) -> dict:
+    """
+    사용자는 '그냥 제이슨 키만 붙여넣기'를 원합니다.
+    - 정상 JSON (private_key가 \\n 포함) -> json.loads 성공
+    - private_key가 멀티라인으로 깨진 JSON -> 자동 복구 후 json.loads 재시도
+    """
+    raw = str(value).strip()
+
+    # Streamlit secrets에 dict로 들어오는 경우도 있으므로 상위에서 처리
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        repaired = _repair_private_key_multiline_json(raw)
+        return json.loads(repaired)
 
 
 def get_service_account_info():
@@ -223,7 +270,7 @@ def get_service_account_info():
         v = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
         if isinstance(v, dict):
             return v
-        return json.loads(str(v))
+        return parse_service_account_json(v)
 
     # 2) Secrets: [connections.gsheets] (Streamlit 공식 연결 방식)
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
@@ -246,7 +293,7 @@ def get_service_account_info():
     # 3) 환경변수 폴백
     env = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
     if env:
-        return json.loads(env)
+        return parse_service_account_json(env)
 
     raise RuntimeError(
         "서비스계정이 설정되지 않았습니다. "
@@ -377,6 +424,9 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str) 
 
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
+    if "호" in t.columns:
+        t["층"] = t["호"].map(extract_floor_from_ho)
+
     price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
     if price_col:
         t["가격(억)"] = t[price_col].map(to_eok_display)
@@ -385,7 +435,7 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str) 
     if "가격(억)" in t.columns:
         preferred.append("가격(억)")
 
-    for extra in ["구역", "동", "호", "비고"]:
+    for extra in ["구역", "동", "층", "비고"]:
         if extra in t.columns and extra not in preferred:
             preferred.append(extra)
 
@@ -420,6 +470,51 @@ def extract_floor_from_level(x) -> str:
     m = re.search(r"(\d+)", s)
     return m.group(1) if m else s
 
+
+def extract_floor_from_ho(x) -> str:
+    """
+    거래내역의 '호' 값에서 '층'만 남겨 표기합니다.
+    규칙:
+      - '14층' 처럼 이미 층이 포함되어 있으면 '14층'으로 표기
+      - '102' 처럼 숫자만 있으면 뒤 2자리는 호수로 보고, 앞자리를 층으로 간주 -> '1층'
+      - '1002' -> '10층' (뒤 2자리 제거)
+      - '14' 처럼 1~2자리 숫자는 층으로 간주 -> '14층'
+      - '14/02' 또는 '14-02' 등은 앞 숫자를 층으로 간주
+    """
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return ""
+
+    if "층" in s:
+        m = re.search(r"(\d+)\s*층", s)
+        if m:
+            return f"{int(m.group(1))}층"
+        m2 = re.search(r"(\d+)", s)
+        return f"{int(m2.group(1))}층" if m2 else s
+
+    if "/" in s or "-" in s:
+        m = re.search(r"(\d+)", s)
+        if m:
+            return f"{int(m.group(1))}층"
+        return ""
+
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return ""
+    # 3자리 이상이면 뒤 2자리는 호수로 보고 제거
+    if len(digits) >= 3:
+        floor_digits = digits[:-2]
+        try:
+            return f"{int(floor_digits)}층"
+        except Exception:
+            return ""
+    # 1~2자리: 층으로 간주
+    try:
+        return f"{int(digits)}층"
+    except Exception:
+        return ""
 
 # =================== UI ===================
 st.set_page_config(layout="wide")
@@ -670,9 +765,9 @@ df_pick["가격_num"] = pd.to_numeric(df_pick["가격"], errors="coerce")
 df_pick = df_pick.sort_values("가격_num", ascending=True, na_position="last").reset_index(drop=True)
 
 # 노출 컬럼 (필요 시 부동산 포함)
-show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격", "요약내용", "상태"]
+show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격"]
 if "부동산" in df_pick.columns:
-    show_cols.insert(show_cols.index("요약내용"), "부동산")
+    show_cols.insert(show_cols.index("가격") + 1, "부동산") if "가격" in show_cols else show_cols.append("부동산")
 show_cols = [c for c in show_cols if c in df_pick.columns]
 view_pick = df_pick[show_cols].reset_index(drop=True)
 
@@ -687,8 +782,6 @@ try:
         "층": st.column_config.TextColumn("층", width="small"),
         "가격": st.column_config.NumberColumn("가격", width="small"),
         "부동산": st.column_config.TextColumn("부동산", width="small"),
-        "요약내용": st.column_config.TextColumn("요약내용", width="large"),
-        "상태": st.column_config.TextColumn("상태", width="small"),
     }
     col_cfg = {k: v for k, v in col_cfg.items() if k in view_pick.columns}
 except Exception:
