@@ -527,7 +527,7 @@ def extract_floor_from_ho(x) -> str:
 
 # =================== UI ===================
 st.set_page_config(layout="wide")
-st.title("압구정 매물 지도 (공개용)")
+st.title("압구정동 매물 지도")
 
 # 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
 st.markdown(
@@ -778,7 +778,7 @@ area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 df_complex = df_view[df_view["단지명"] == complex_name].copy()
 pyeong_candidates = sorted(df_complex["평형"].astype(str).str.strip().dropna().unique().tolist())
 
-st.subheader("선택 단지/평형의 활성 매물 (동 무관, 가격 낮은 순)")
+st.subheader("선택 단지/평형의 매물시세 (가격 낮은 순)")
 if not pyeong_candidates:
     st.info("선택한 단지에서 평형 정보를 찾을 수 없습니다.")
     st.stop()
@@ -828,9 +828,9 @@ st_df(
 st.divider()
 
 # =========================
-# (2) 거래내역 최신 5건 (단지+평형 일치)
+# (2) 거래내역 최근 5건 
 # =========================
-st.subheader("거래내역 최신 5건 (단지/평형 일치)")
+st.subheader("거래내역 최근 5건")
 trades = recent_trades(df_trade, complex_name, sel_pyeong)
 if trades.empty:
     st.info("일치하는 거래내역이 없습니다.")
@@ -857,7 +857,7 @@ st.divider()
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
-    st.subheader("선택 구역 평형별 요약 (활성 매물)")
+    st.subheader("선택 구역 평형별 시세")
     if not area_value:
         st.info("선택한 마커의 구역 정보가 없습니다.")
     else:
@@ -873,7 +873,7 @@ with col_left:
             )
 
 with col_right:
-    st.subheader("빠른 필터 (활성 매물)")
+    st.subheader("압구정 매물 검색색""
 
     # (A) 평형대 버튼: 20,30,40...
     c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 1, 1.2])
@@ -957,7 +957,7 @@ with col_right:
         cols_exist = [c for c in display_cols if c in dfq.columns]
 
         st.caption(f"해당 조건 매물: {len(dfq):,}건 (표는 스크롤로 전체 확인 가능합니다)")
-        st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
+        st.markdown("낮은 가격 순서")
 
         df_show = dfq[cols_exist + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
         df_table = df_show[cols_exist].copy()
