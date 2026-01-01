@@ -557,6 +557,18 @@ div[data-testid="stDataFrame"] div[role="gridcell"] {
     justify-content: center !important;
     text-align: center !important;
 }
+div[data-testid="stDataFrame"] div[role="gridcell"] > div {
+    margin: 0 auto !important;
+    text-align: center !important;
+}
+div[data-testid="stDataFrame"] div[role="columnheader"] > div {
+    margin: 0 auto !important;
+    text-align: center !important;
+}
+div[data-testid="stDataFrame"] table td,
+div[data-testid="stDataFrame"] table th {
+    text-align: center !important;
+}
 </style>
     """,
     unsafe_allow_html=True,
@@ -941,9 +953,7 @@ with col_right:
     if dfq.empty:
         st.info("조건에 맞는 매물이 없습니다.")
     else:
-        display_cols = ["구역", "평형대", "평형", "단지명", "동", "층", "가격", "요약내용"]
-        if "부동산" in dfq.columns:
-            display_cols.append("부동산")
+                display_cols = ["구역", "평형대", "평형", "단지명", "동", "층", "가격"]
         cols_exist = [c for c in display_cols if c in dfq.columns]
 
         st.caption(f"해당 조건 매물: {len(dfq):,}건 (표는 스크롤로 전체 확인 가능합니다)")
