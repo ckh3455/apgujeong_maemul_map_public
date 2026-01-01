@@ -929,7 +929,7 @@ with col_right:
                 st.session_state["quick_filter_area_norm"] = "__ALL__" if lab == "__ALL__" else lab
                 st.rerun()
 
-# (C) 결과: 낮은 가격 순
+    # (C) 결과: 낮은 가격 순
     area_display = "전체" if sel_area_norm == "__ALL__" else area_labels.get(sel_area_norm, f"{sel_area_norm}구역")
 
     if mode == "size":
@@ -953,7 +953,7 @@ with col_right:
     if dfq.empty:
         st.info("조건에 맞는 매물이 없습니다.")
     else:
-                display_cols = ["구역", "평형대", "평형", "단지명", "동", "층", "가격"]
+        display_cols = ["구역", "평형대", "평형", "단지명", "동", "층", "가격"]
         cols_exist = [c for c in display_cols if c in dfq.columns]
 
         st.caption(f"해당 조건 매물: {len(dfq):,}건 (표는 스크롤로 전체 확인 가능합니다)")
