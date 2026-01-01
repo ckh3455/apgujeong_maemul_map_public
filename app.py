@@ -395,8 +395,9 @@ def summarize_area_by_size(df_active: pd.DataFrame, area_value: str) -> pd.DataF
 def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str) -> pd.DataFrame:
     """
     공개용 요구사항:
-    - '구역' 조건 제거
     - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
+    - 출력 컬럼: 날짜, 단지, 평형, 가격(억), 구역, 동, 층 (그 외 출력 금지)
+    - '호'가 숫자(예: 102, 1002)로 들어오면 뒤 2자리는 호수로 보고 앞자리를 층으로 계산해 '층'으로 출력
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
@@ -418,30 +419,38 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str) 
     if t.empty:
         return pd.DataFrame()
 
-    # 날짜 파싱: 기존 "%y.%m.%d" 우선, 실패 시 일반 파싱
+    # 날짜 파싱
     t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
     t.loc[t["_dt"].isna(), "_dt"] = pd.to_datetime(t.loc[t["_dt"].isna(), col_date], errors="coerce")
 
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
-    if "호" in t.columns:
-        t["층"] = t["호"].map(extract_floor_from_ho)
-
+    # 가격(억)
     price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
     if price_col:
         t["가격(억)"] = t[price_col].map(to_eok_display)
+    else:
+        t["가격(억)"] = ""
 
-    preferred = [col_date, col_complex, col_size]
-    if "가격(억)" in t.columns:
-        preferred.append("가격(억)")
+    # 층 (호 -> 층)
+    if "호" in t.columns:
+        t["층"] = t["호"].map(extract_floor_from_ho)
+    elif "층" in t.columns:
+        t["층"] = t["층"].map(extract_floor_from_level).map(lambda v: f"{v}층" if str(v).strip() else "")
+    else:
+        t["층"] = ""
 
-    for extra in ["구역", "동", "층", "비고"]:
-        if extra in t.columns and extra not in preferred:
-            preferred.append(extra)
+    out = pd.DataFrame()
+    out["날짜"] = t[col_date].astype(str)
+    out["단지"] = t[col_complex].astype(str)
+    out["평형"] = t[col_size].astype(str)
+    out["가격(억)"] = t["가격(억)"].astype(str)
 
-    out = t[preferred].copy()
-    return out
+    out["구역"] = t["구역"].astype(str) if "구역" in t.columns else ""
+    out["동"] = t["동"].astype(str) if "동" in t.columns else ""
+    out["층"] = t["층"].astype(str)
 
+    return out[["날짜", "단지", "평형", "가격(억)", "구역", "동", "층"]]
 
 def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
     if clicked_lat is None or clicked_lng is None:
@@ -537,6 +546,16 @@ div[data-testid="stDataFrame"] .row_heading {
 }
 div[data-testid="stDataFrame"] div[role="grid"] {
     padding-left: 0 !important;
+}
+
+/* Center align dataframe headers & cells */
+div[data-testid="stDataFrame"] div[role="columnheader"] {
+    justify-content: center !important;
+    text-align: center !important;
+}
+div[data-testid="stDataFrame"] div[role="gridcell"] {
+    justify-content: center !important;
+    text-align: center !important;
 }
 </style>
     """,
@@ -878,23 +897,27 @@ with col_right:
         sel_area_norm = "__ALL__"
         st.session_state["quick_filter_area_norm"] = "__ALL__"
 
-    st.markdown("**구역 선택**")
-    aleft, aright = st.columns(2)
+        st.markdown("**구역 선택**")
 
-    all_label = "[선택] 전체" if sel_area_norm == "__ALL__" else "전체"
-    if aleft.button(all_label, use_container_width=True, key="qarea_all"):
-        st.session_state["quick_filter_area_norm"] = "__ALL__"
-        st.rerun()
+    # 평형대 버튼과 동일한 스타일로, 전체 + 1구역,2구역... 순서로 출력
+    area_btn_labels = ["__ALL__"] + area_norms
+    area_btn_text = ["전체"] + [area_labels.get(an, f"{an}구역") for an in area_norms]
 
-    for i, an in enumerate(area_norms):
-        label = area_labels.get(an, str(an))
-        btn_label = f"[선택] {label}" if an == sel_area_norm else label
-        target_col = aleft if (i % 2 == 0) else aright
-        if target_col.button(btn_label, use_container_width=True, key=f"qarea_{an}"):
-            st.session_state["quick_filter_area_norm"] = an
-            st.rerun()
+    max_cols = 8
+    for start in range(0, len(area_btn_labels), max_cols):
+        cols = st.columns(max_cols)
+        chunk_labels = area_btn_labels[start:start + max_cols]
+        chunk_text = area_btn_text[start:start + max_cols]
 
-    # (C) 결과: 낮은 가격 순
+        for i, (lab, txt) in enumerate(zip(chunk_labels, chunk_text)):
+            is_sel = (sel_area_norm == "__ALL__") if lab == "__ALL__" else (lab == sel_area_norm)
+            shown = f"[선택] {txt}" if is_sel else txt
+            key = "qarea_all" if lab == "__ALL__" else f"qarea_{lab}"
+            if cols[i].button(shown, use_container_width=True, key=key):
+                st.session_state["quick_filter_area_norm"] = "__ALL__" if lab == "__ALL__" else lab
+                st.rerun()
+
+# (C) 결과: 낮은 가격 순
     area_display = "전체" if sel_area_norm == "__ALL__" else area_labels.get(sel_area_norm, f"{sel_area_norm}구역")
 
     if mode == "size":
