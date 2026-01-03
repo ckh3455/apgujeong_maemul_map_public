@@ -175,6 +175,24 @@ def compact_strings(df: "pd.DataFrame", max_len_by_col: dict | None = None, defa
     return out
 
 
+
+def st_html_table(df: "pd.DataFrame", max_len_by_col: dict | None = None, default_max: int = 12, max_rows: int | None = None):
+    """Streamlit 표를 HTML로 렌더링 (모바일: 좌우 스크롤 최소화 + 가운데 정렬).
+    - 문자열 컬럼은 compact_strings로 축약
+    - table-layout: fixed + wrapping CSS(.tbl-wrap) 전제
+    """
+    if df is None or getattr(df, "empty", False):
+        st.info("표로 표시할 데이터가 없습니다.")
+        return
+
+    disp = compact_strings(df.copy(), max_len_by_col=max_len_by_col, default_max=default_max)
+    if max_rows is not None:
+        disp = disp.head(int(max_rows))
+
+    html = disp.to_html(index=False, escape=True)
+    st.markdown(f'<div class="tbl-wrap">{html}</div>', unsafe_allow_html=True)
+
+
 def to_eok_display(value) -> str:
     """원 단위면 억으로 환산, 이미 억이면 그대로"""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -629,18 +647,22 @@ st.markdown(
     margin: 8px 0 0 0;
 }
 
-/* ===== 지도(모바일) 높이 조절 ===== */
-.map-wrap iframe {
+/* ===== 지도(모바일) 높이 조절 (Folium iframe) ===== */
+div[data-testid="stIFrame"] {
     height: 455px !important;   /* PC/태블릿 기본 */
+}
+div[data-testid="stIFrame"] iframe {
+    height: 455px !important;   /* PC/태블릿 기본 */
+    width: 100% !important;
 }
 
 /* 모바일(가로폭 768px 이하)에서는 지도를 낮게 */
 @media (max-width: 768px) {
-    .map-wrap iframe {
-        height: 300px !important;  /* 필요하면 260~340px 조정 */
+    div[data-testid="stIFrame"],
+    div[data-testid="stIFrame"] iframe {
+        height: 300px !important;  /* 필요하면 260~340px 사이로 조정 */
     }
 }
-
 /* ===== End custom UI ===== */
 
 div[data-testid="stDataFrame"] div[role="rowheader"],
@@ -707,6 +729,41 @@ div[data-testid="stDataFrame"] table {
     }
 }
 /* ===== End DataFrame mobile ===== */
+
+
+
+/* ===== 표(모바일) 가독성: 한 화면 + 가운데 정렬 ===== */
+.tbl-wrap{
+    width: 100%;
+    overflow-x: hidden; /* 가급적 좌우 스크롤 방지 */
+}
+.tbl-wrap table{
+    width: 100% !important;
+    table-layout: fixed !important;
+    border-collapse: collapse;
+}
+.tbl-wrap th, .tbl-wrap td{
+    text-align: center !important;
+    vertical-align: middle !important;
+    border: 1px solid rgba(0,0,0,0.10);
+    padding: 6px 4px;
+    font-size: 13px;
+    line-height: 1.25;
+    max-width: 0;          /* table-layout:fixed 에서 필수 */
+    white-space: normal;   /* 줄바꿈 허용 */
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.tbl-wrap th{
+    background: rgba(0,0,0,0.03);
+    font-weight: 800;
+}
+@media (max-width: 768px){
+    .tbl-wrap th, .tbl-wrap td{
+        padding: 4px 3px;
+        font-size: 11px;
+    }
+}
 
 </style>
     """,
@@ -879,17 +936,13 @@ for _, r in gdf.iterrows():
     ).add_to(m)
 
 st.subheader("지도")
-st.markdown('<div class="map-wrap">', unsafe_allow_html=True)
 out = st_folium(
     m,
     height=455,
     width=None,
     returned_objects=["last_object_clicked"],
     key="map",
-)
-st.markdown('</div>', unsafe_allow_html=True)
-
-if out:
+)if out:
     clicked = out.get("last_object_clicked", None)
     if clicked:
         lat = clicked.get("lat")
@@ -979,19 +1032,8 @@ if trades.empty:
     st.info("일치하는 거래내역이 없습니다.")
 else:
     trades2 = trades.reset_index(drop=True)
-    trades2_disp = compact_strings(trades2, default_max=12)
-    styled = trades2_disp.style.set_properties(**{"color": "red"})
-    try:
-        styled = styled.hide(axis="index")
-    except Exception:
-        pass
 
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        height=dataframe_height(trades2_disp, max_height=240),
-    )
-
+    st_html_table(trades2, default_max=12)
 st.divider()
 
 # =========================
