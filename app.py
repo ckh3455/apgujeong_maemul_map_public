@@ -660,7 +660,7 @@ div[data-testid="stIFrame"] iframe {
 @media (max-width: 768px) {
     div[data-testid="stIFrame"],
     div[data-testid="stIFrame"] iframe {
-        height: 300px !important;  /* 필요하면 260~340px 사이로 조정 */
+        height: 240px !important;  /* 필요하면 260~340px 사이로 조정 */
     }
 }
 /* ===== End custom UI ===== */
