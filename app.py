@@ -527,11 +527,33 @@ def extract_floor_from_ho(x) -> str:
 
 # =================== UI ===================
 st.set_page_config(layout="wide")
-# ====== 상단 헤더(타이틀 + 우측 홍보) ======
+
+# ===== 상단: 타이틀(좌) + 업소홍보(우) =====
+col_title, col_promo = st.columns([3.3, 1.7])
+
+with col_title:
+    st.markdown('<div class="app-title"><h1>압구정동 매물 지도</h1></div>', unsafe_allow_html=True)
+
+with col_promo:
+    st.markdown(
+        """
+        <div class="promo-card">
+            <div class="promo-name">☎ 압구정 원 부동산</div>
+            <div class="promo-desc">압구정 재건축 전문 컨설팅 · 확실한 순위 판단</div>
+            <div class="promo-label">문의</div>
+            <div class="promo-contact">02-540-3334 / 최이사 Mobile 010-3065-1780</div>
+            <div class="promo-sub">압구정 미래가치 예측.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+# ==========================================
+# 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
 st.markdown(
     """
 <style>
-/* Header title */
+
+/* ===== Header title & Promo card ===== */
 .app-title h1{
     margin: 0;
     padding: 0;
@@ -577,34 +599,21 @@ st.markdown(
     color: rgba(0,0,0,0.55);
     margin: 8px 0 0 0;
 }
-</style>
-    """,
-    unsafe_allow_html=True,
-)
 
-col_title, col_promo = st.columns([3.3, 1.7])
+/* ===== 지도(모바일) 높이 조절 ===== */
+.map-wrap iframe {
+    height: 455px !important;   /* PC/태블릿 기본 */
+}
 
-with col_title:
-    st.markdown('<div class="app-title"><h1>압구정동 매물 지도</h1></div>', unsafe_allow_html=True)
+/* 모바일(가로폭 768px 이하)에서는 지도를 낮게 */
+@media (max-width: 768px) {
+    .map-wrap iframe {
+        height: 300px !important;  /* 필요하면 260~340px 조정 */
+    }
+}
 
-with col_promo:
-    promo_html = """
-    <div class="promo-card">
-        <div class="promo-name">☎ 압구정 원 부동산</div>
-        <div class="promo-desc">압구정 재건축 전문 컨설팅 · 확실한 순위 판단</div>
-        <div class="promo-label">문의</div>
-        <div class="promo-contact">02-540-3334 / 최이사 Mobile 010-3065-1780</div>
-        <div class="promo-sub">압구정 미래가치 예측.</div>
-    </div>
-    """
-    st.markdown(promo_html, unsafe_allow_html=True)
-# ==========================================
+/* ===== End custom UI ===== */
 
-
-# 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
-st.markdown(
-    """
-<style>
 div[data-testid="stDataFrame"] div[role="rowheader"],
 div[data-testid="stDataFrame"] div[role="rowheader"] * {
     display: none !important;
@@ -812,6 +821,7 @@ for _, r in gdf.iterrows():
     ).add_to(m)
 
 st.subheader("지도")
+st.markdown('<div class="map-wrap">', unsafe_allow_html=True)
 out = st_folium(
     m,
     height=455,
@@ -819,6 +829,7 @@ out = st_folium(
     returned_objects=["last_object_clicked"],
     key="map",
 )
+st.markdown('</div>', unsafe_allow_html=True)
 
 if out:
     clicked = out.get("last_object_clicked", None)
