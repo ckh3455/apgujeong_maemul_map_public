@@ -1186,5 +1186,5 @@ with col_right:
                 "평형대": 6,
             },
             default_max=10,
-            max_rows=80,  # 모바일 성능/가독성 상 기본 80행(필요시 조정)
+            max_rows=none,  # 모바일 성능/가독성 상 기본 80행(필요시 조정)
         )
