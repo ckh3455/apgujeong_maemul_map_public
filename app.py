@@ -527,7 +527,79 @@ def extract_floor_from_ho(x) -> str:
 
 # =================== UI ===================
 st.set_page_config(layout="wide")
-st.title("압구정동 매물 지도")
+# ====== 상단 헤더(타이틀 + 우측 홍보) ======
+st.markdown(
+    """
+<style>
+/* Header title */
+.app-title h1{
+    margin: 0;
+    padding: 0;
+    font-size: 56px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: #2b2f36;
+}
+
+/* Promo card */
+.promo-card{
+    border: 1px solid rgba(0,0,0,0.10);
+    border-radius: 14px;
+    padding: 14px 16px;
+    background: #ffffff;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+}
+.promo-name{
+    font-size: 18px;
+    font-weight: 800;
+    margin: 0 0 6px 0;
+}
+.promo-desc{
+    font-size: 14px;
+    font-weight: 600;
+    color: #2b2f36;
+    margin: 0 0 10px 0;
+}
+.promo-label{
+    font-size: 13px;
+    font-weight: 800;
+    margin: 0 0 2px 0;
+}
+.promo-contact{
+    font-size: 13px;
+    font-weight: 600;
+    color: #2b2f36;
+    margin: 0;
+    line-height: 1.4;
+}
+.promo-sub{
+    font-size: 12px;
+    color: rgba(0,0,0,0.55);
+    margin: 8px 0 0 0;
+}
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
+col_title, col_promo = st.columns([3.3, 1.7])
+
+with col_title:
+    st.markdown('<div class="app-title"><h1>압구정동 매물 지도</h1></div>', unsafe_allow_html=True)
+
+with col_promo:
+    promo_html = """
+    <div class="promo-card">
+        <div class="promo-name">☎ 압구정 원 부동산</div>
+        <div class="promo-desc">압구정 재건축 전문 컨설팅 · 확실한 순위 판단</div>
+        <div class="promo-label">문의</div>
+        <div class="promo-contact">02-540-3334 / 최이사 Mobile 010-3065-1780</div>
+        <div class="promo-sub">압구정 미래가치 예측.</div>
+    </div>
+    """
+    st.markdown(promo_html, unsafe_allow_html=True)
+# ==========================================
+
 
 # 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
 st.markdown(
