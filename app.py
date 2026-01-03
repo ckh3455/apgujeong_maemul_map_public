@@ -735,8 +735,18 @@ div[data-testid="stDataFrame"] table {
 /* ===== 표(모바일) 가독성: 한 화면 + 가운데 정렬 ===== */
 .tbl-wrap{
     width: 100%;
+    /* 표 자체를 "내부 스크롤"로 보이게 해서 페이지를 길게 늘리지 않음 */
+    max-height: 520px;
+    overflow-y: auto;
     overflow-x: hidden; /* 가급적 좌우 스크롤 방지 */
+    -webkit-overflow-scrolling: touch;
 }
+@media (max-width: 768px){
+    .tbl-wrap{
+        max-height: 360px; /* 모바일: 표 영역 고정 높이(원하면 300~420px 조정) */
+    }
+}
+
 .tbl-wrap table{
     width: 100% !important;
     table-layout: fixed !important;
@@ -1186,5 +1196,4 @@ with col_right:
                 "평형대": 6,
             },
             default_max=10,
-            max_rows=300,  # 모바일 성능/가독성 상 기본 80행(필요시 조정)
         )
