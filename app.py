@@ -146,6 +146,35 @@ def st_df(obj, **kwargs):
         return st.dataframe(obj, **kwargs)
 
 
+def compact_strings(df: "pd.DataFrame", max_len_by_col: dict | None = None, default_max: int = 10) -> "pd.DataFrame":
+    """모바일에서 표가 좌우 스크롤 없이 보이도록 문자열 컬럼을 축약(…).
+    - 기본: 문자열 컬럼을 default_max 길이로 축약
+    - max_len_by_col로 컬럼별 최대 길이를 지정 가능
+    """
+    if df is None or getattr(df, "empty", False):
+        return df
+    max_len_by_col = max_len_by_col or {}
+    out = df.copy()
+    for col in out.columns:
+        # 문자열/혼합 컬럼만 처리
+        if pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col]):
+            max_len = int(max_len_by_col.get(col, default_max))
+            ser = out[col].fillna("").astype(str)
+            ser = ser.str.replace(r"\s+", " ", regex=True).str.strip()
+
+            def _cut(x: str) -> str:
+                if not x:
+                    return ""
+                if len(x) <= max_len:
+                    return x
+                if max_len <= 1:
+                    return "…"
+                return x[: max_len - 1] + "…"
+
+            out[col] = ser.map(_cut)
+    return out
+
+
 def to_eok_display(value) -> str:
     """원 단위면 억으로 환산, 이미 억이면 그대로"""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -650,6 +679,35 @@ div[data-testid="stDataFrame"] table td,
 div[data-testid="stDataFrame"] table th {
     text-align: center !important;
 }
+
+/* ===== DataFrame: wrap + mobile-friendly (no horizontal scroll) ===== */
+div[data-testid="stDataFrame"] div[role="gridcell"],
+div[data-testid="stDataFrame"] div[role="columnheader"] {
+    white-space: normal !important;
+}
+div[data-testid="stDataFrame"] div[role="gridcell"] *,
+div[data-testid="stDataFrame"] div[role="columnheader"] * {
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+}
+div[data-testid="stDataFrame"] table {
+    table-layout: fixed !important;
+    width: 100% !important;
+}
+
+/* 모바일에서는 폰트/패딩을 더 줄여 한 화면에 들어오도록 */
+@media (max-width: 768px) {
+    div[data-testid="stDataFrame"] * {
+        font-size: 12px !important;
+    }
+    div[data-testid="stDataFrame"] div[role="gridcell"],
+    div[data-testid="stDataFrame"] div[role="columnheader"] {
+        padding: 2px 4px !important;
+    }
+}
+/* ===== End DataFrame mobile ===== */
+
 </style>
     """,
     unsafe_allow_html=True,
@@ -901,10 +959,12 @@ try:
 except Exception:
     col_cfg = None
 
+view_pick_disp = compact_strings(view_pick, max_len_by_col={"단지명": 10, "요약내용": 14}, default_max=10)
+
 st_df(
-    view_pick,
+    view_pick_disp,
     use_container_width=True,
-    height=dataframe_height(view_pick, max_height=650),
+    height=dataframe_height(view_pick_disp, max_height=650),
     column_config=col_cfg,
 )
 
@@ -919,7 +979,8 @@ if trades.empty:
     st.info("일치하는 거래내역이 없습니다.")
 else:
     trades2 = trades.reset_index(drop=True)
-    styled = trades2.style.set_properties(**{"color": "red"})
+    trades2_disp = compact_strings(trades2, default_max=12)
+    styled = trades2_disp.style.set_properties(**{"color": "red"})
     try:
         styled = styled.hide(axis="index")
     except Exception:
@@ -928,7 +989,7 @@ else:
     st.dataframe(
         styled,
         use_container_width=True,
-        height=dataframe_height(trades2, max_height=240),
+        height=dataframe_height(trades2_disp, max_height=240),
     )
 
 st.divider()
@@ -949,10 +1010,11 @@ with col_left:
             st.info("해당 구역에서 요약할 데이터가 없습니다.")
         else:
             summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]].reset_index(drop=True)
+            summary_view_disp = compact_strings(summary_view, default_max=12)
             st_df(
-                summary_view,
+                summary_view_disp,
                 use_container_width=True,
-                height=dataframe_height(summary_view, max_height=380),
+                height=dataframe_height(summary_view_disp, max_height=380),
             )
 
 with col_right:
@@ -1044,10 +1106,22 @@ with col_right:
 
         df_show = dfq[cols_exist + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
         df_table = df_show[cols_exist].copy()
+        df_table_disp = compact_strings(
+            df_table,
+            max_len_by_col={
+                "단지명": 10,
+                "아파트명": 10,
+                "요약내용": 14,
+                "동": 4,
+                "평형": 6,
+                "평형대": 6,
+            },
+            default_max=10,
+        )
 
         event = st_df(
-            df_table,
-            height=dataframe_height(df_table, max_height=900),
+            df_table_disp,
+            height=dataframe_height(df_table_disp, max_height=900),
             use_container_width=True,
             on_select="rerun",
             selection_mode="single-row",
