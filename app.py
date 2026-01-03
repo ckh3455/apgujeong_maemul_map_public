@@ -942,7 +942,9 @@ out = st_folium(
     width=None,
     returned_objects=["last_object_clicked"],
     key="map",
-)if out:
+)
+
+if out:
     clicked = out.get("last_object_clicked", None)
     if clicked:
         lat = clicked.get("lat")
