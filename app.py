@@ -660,7 +660,7 @@ div[data-testid="stIFrame"] iframe {
 @media (max-width: 768px) {
     div[data-testid="stIFrame"],
     div[data-testid="stIFrame"] iframe {
-        height: 240px !important;  /* 필요하면 260~340px 사이로 조정 */
+        height: 300px !important;  /* 필요하면 260~340px 사이로 조정 */
     }
 }
 /* ===== End custom UI ===== */
@@ -1014,13 +1014,19 @@ try:
 except Exception:
     col_cfg = None
 
-view_pick_disp = compact_strings(view_pick, max_len_by_col={"단지명": 10, "요약내용": 14}, default_max=10)
-
-st_df(
+# 모든 표는 HTML 테이블로 렌더링(가운데 정렬 + 모바일 폭 최적화)
+view_pick_disp = view_pick.copy()
+st_html_table(
     view_pick_disp,
-    use_container_width=True,
-    height=dataframe_height(view_pick_disp, max_height=650),
-    column_config=col_cfg,
+    max_len_by_col={
+        "단지명": 10,
+        "아파트명": 10,
+        "요약내용": 14,
+        "동": 4,
+        "평형": 6,
+        "평형대": 6,
+    },
+    default_max=10,
 )
 
 st.divider()
@@ -1054,28 +1060,33 @@ with col_left:
             st.info("해당 구역에서 요약할 데이터가 없습니다.")
         else:
             summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]].reset_index(drop=True)
-            summary_view_disp = compact_strings(summary_view, default_max=12)
-            st_df(
-                summary_view_disp,
-                use_container_width=True,
-                height=dataframe_height(summary_view_disp, max_height=380),
-            )
+            # 모든 표는 HTML 테이블로 렌더링(가운데 정렬 + 모바일 폭 최적화)
+            st_html_table(summary_view, default_max=12)
 
 with col_right:
     st.subheader("압구정 매물 시세 검색")
 
     # (A) 평형대 버튼: 20,30,40...
-    c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 1, 1.2])
+    # 모바일에서 세로로 너무 길어지는 것을 방지하기 위해 2줄(4열) 고정 배치
+    row1 = st.columns(4)
+    row2 = st.columns(4)
 
-    buckets = [20, 30, 40, 50, 60, 70, 80]
-    cols = [c0, c1, c2, c3, c4, c5, c6]
-    for col, b in zip(cols, buckets):
+    buckets_row1 = [20, 30, 40, 50]
+    buckets_row2 = [60, 70, 80]
+
+    for col, b in zip(row1, buckets_row1):
         if col.button(f"{b}평대", use_container_width=True, key=f"qsize_{b}"):
             st.session_state["quick_filter_mode"] = "size"
             st.session_state["quick_filter_bucket"] = b
             st.rerun()
 
-    if c7.button("가격순", use_container_width=True, key="qprice"):
+    for col, b in zip(row2[:3], buckets_row2):
+        if col.button(f"{b}평대", use_container_width=True, key=f"qsize_{b}"):
+            st.session_state["quick_filter_mode"] = "size"
+            st.session_state["quick_filter_bucket"] = b
+            st.rerun()
+
+    if row2[3].button("가격순", use_container_width=True, key="qprice"):
         st.session_state["quick_filter_mode"] = "price"
         st.rerun()
 
@@ -1104,7 +1115,7 @@ with col_right:
     area_btn_labels = ["__ALL__"] + area_norms
     area_btn_text = ["전체"] + [area_labels.get(an, f"{an}구역") for an in area_norms]
 
-    max_cols = 8
+    max_cols = 4
     for start in range(0, len(area_btn_labels), max_cols):
         cols = st.columns(max_cols)
         chunk_labels = area_btn_labels[start:start + max_cols]
@@ -1112,7 +1123,7 @@ with col_right:
 
         for i, (lab, txt) in enumerate(zip(chunk_labels, chunk_text)):
             is_sel = (sel_area_norm == "__ALL__") if lab == "__ALL__" else (lab == sel_area_norm)
-            shown = f"[선택] {txt}" if is_sel else txt
+            shown = f"✓ {txt}" if is_sel else txt
             key = "qarea_all" if lab == "__ALL__" else f"qarea_{lab}"
             if cols[i].button(shown, use_container_width=True, key=key):
                 st.session_state["quick_filter_area_norm"] = "__ALL__" if lab == "__ALL__" else lab
@@ -1163,39 +1174,17 @@ with col_right:
             default_max=10,
         )
 
-        event = st_df(
-            df_table_disp,
-            height=dataframe_height(df_table_disp, max_height=900),
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
+        # 낮은 가격 순서 표: 선택(체크박스) 기능 제거, HTML 테이블로 출력
+        st_html_table(
+            df_table,
+            max_len_by_col={
+                "단지명": 10,
+                "아파트명": 10,
+                "요약내용": 14,
+                "동": 4,
+                "평형": 6,
+                "평형대": 6,
+            },
+            default_max=10,
+            max_rows=80,  # 모바일 성능/가독성 상 기본 80행(필요시 조정)
         )
-
-        try:
-            if event and getattr(event, "selection", None) and event.selection.rows:
-                ridx = event.selection.rows[0]
-                row = df_show.iloc[ridx]
-
-                sel_sig = f"{row.get('단지명','')}|{row.get('동_key','')}|{row.get('평형대','')}|{row.get('가격_num','')}"
-                if st.session_state["last_table_sel_sig"] != sel_sig:
-                    st.session_state["last_table_sel_sig"] = sel_sig
-
-                    latv = pd.to_numeric(row.get("위도"), errors="coerce")
-                    lngv = pd.to_numeric(row.get("경도"), errors="coerce")
-                    if pd.isna(latv) or pd.isna(lngv):
-                        st.warning("선택한 매물은 좌표가 없어 지도를 이동할 수 없습니다. (목록은 정상 표시됩니다)")
-                    else:
-                        st.session_state["map_center"] = [float(latv), float(lngv)]
-                        st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
-
-                        st.session_state["selected_meta"] = {
-                            "단지명": row["단지명"],
-                            "동_key": row["동_key"],
-                            "구역": row.get("구역", ""),
-                            "위도": float(latv),
-                            "경도": float(lngv),
-                        }
-                        st.session_state["last_click_sig"] = ""
-                        st.rerun()
-        except Exception:
-            pass
