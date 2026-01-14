@@ -968,7 +968,7 @@ area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 # =========================
 # (0) 전체지역: 지분당 가격 (싼 순) - 15행 노출 박스 + 스크롤로 전체
 # =========================
-st.subheader("지분당 가격 (싼 순) - 전체지역/전체평형")
+st.subheader("지분당 가성비 - 전체지역/전체평형")
 
 df_top = df_view.copy()
 df_top = df_top[df_top["지분당가격_num"].notna()].copy()
@@ -1007,7 +1007,7 @@ st.divider()
 df_complex = df_view[df_view["단지명"] == complex_name].copy()
 pyeong_candidates = sorted(df_complex["평형"].astype(str).str.strip().dropna().unique().tolist())
 
-st.subheader("선택 단지/평형의 매물시세 (지분당 가격 낮은 순)")
+st.subheader("선택 단지/평형의 매물시세")
 if not pyeong_candidates:
     st.info("선택한 단지에서 평형 정보를 찾을 수 없습니다.")
     st.stop()
