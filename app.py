@@ -16,8 +16,6 @@ from google.oauth2.service_account import Credentials
 # =========================
 # 공개용 컬럼 Allowlist
 # =========================
-# - 시트에 어떤 컬럼이 더 있더라도, 아래 Allowlist에 없는 컬럼은 앱에서 읽지 않습니다.
-# - 민감한 컬럼이 있다면 Allowlist에서 제거하세요.
 LISTING_ALLOW_COLUMNS = [
     "상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격",
     "요약내용", "위도", "경도",
@@ -26,8 +24,6 @@ LISTING_ALLOW_COLUMNS = [
 
 LOC_ALLOW_COLUMNS = ["단지명", "동", "위도", "경도", "구역"]
 TRADE_ALLOW_COLUMNS = [
-    # 거래내역은 시트 구조가 케이스별로 달라 allowlist를 넓게 잡고,
-    # 화면 표시에서 필요한 컬럼만 선택합니다.
     "구역", "단지", "단지명", "단지명(단지)", "평형", "평형대",
     "날짜", "거래일", "계약일", "일자", "거래일자",
     "가격", "거래가격", "거래가", "실거래가", "금액", "거래금액",
@@ -147,10 +143,7 @@ def st_df(obj, **kwargs):
 
 
 def compact_strings(df: "pd.DataFrame", max_len_by_col: dict | None = None, default_max: int = 10) -> "pd.DataFrame":
-    """모바일에서 표가 좌우 스크롤 없이 보이도록 문자열 컬럼을 축약(…).
-    - 기본: 문자열 컬럼을 default_max 길이로 축약
-    - max_len_by_col로 컬럼별 최대 길이를 지정 가능
-    """
+    """문자열 컬럼 축약(…): 모바일 폭 최적화"""
     if df is None or getattr(df, "empty", False):
         return df
     max_len_by_col = max_len_by_col or {}
@@ -180,11 +173,12 @@ def st_html_table(
     default_max: int = 12,
     max_rows: int | None = None,
     col_widths: dict | None = None,
+    wrapper_class: str = "tbl-wrap",
 ):
-    """Streamlit 표를 HTML로 렌더링 (모바일: 좌우 스크롤 최소화 + 가운데 정렬).
+    """Streamlit 표를 HTML로 렌더링 (가운데 정렬 + 스크롤 컨테이너).
     - 문자열 컬럼은 compact_strings로 축약
-    - table-layout: fixed + wrapping CSS(.tbl-wrap) 전제
     - col_widths로 열별 width 강제
+    - wrapper_class로 컨테이너 높이/스크롤 정책 제어
     """
     if df is None or getattr(df, "empty", False):
         st.info("표로 표시할 데이터가 없습니다.")
@@ -208,7 +202,7 @@ def st_html_table(
         colgroup = "<colgroup>" + "".join(col_tags) + "</colgroup>"
         html = re.sub(r"(<table[^>]*>)", r"\1" + colgroup, html, count=1)
 
-    st.markdown(f'<div class="tbl-wrap">{html}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="{wrapper_class}">{html}</div>', unsafe_allow_html=True)
 
 
 def to_eok_display(value) -> str:
@@ -469,7 +463,7 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     """
     - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
     - 출력 컬럼: 날짜, 단지, 평형, 가격(억), 지분당 가격, 구역, 동, 층
-    - 지분당 가격은 df_ref_share(매매물건 목록)에서 (단지명+평형) 대표 대지지분을 매핑해서 계산
+    - 지분당 가격은 df_ref_share에서 (단지명+평형) 대표 대지지분을 매핑해 계산
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
@@ -521,11 +515,10 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
 
             share_map = (
                 ref.dropna(subset=["대지지분_num"])
-                  .groupby(["_complex_norm", "_size_norm"], dropna=False)["대지지분_num"]
-                  .median()
-                  .to_dict()
+                .groupby(["_complex_norm", "_size_norm"], dropna=False)["대지지분_num"]
+                .median()
+                .to_dict()
             )
-
             t["_share_num"] = t.apply(lambda r: share_map.get((r["_complex_norm"], r["_size_norm"])), axis=1)
 
     t["_ppshare"] = t.apply(
@@ -635,6 +628,8 @@ with col_promo:
 st.markdown(
     """
 <style>
+
+/* ===== Header title & Promo card ===== */
 .app-title h1{
     margin: 0;
     padding: 0;
@@ -679,6 +674,7 @@ st.markdown(
     margin: 8px 0 0 0;
 }
 
+/* ===== 지도 높이 ===== */
 div[data-testid="stIFrame"],
 div[data-testid="stIFrame"] iframe {
     height: 455px !important;
@@ -691,6 +687,7 @@ div[data-testid="stIFrame"] iframe {
     }
 }
 
+/* ===== 기본 표 래퍼 ===== */
 .tbl-wrap{
     width: 100%;
     max-height: 520px;
@@ -699,14 +696,34 @@ div[data-testid="stIFrame"] iframe {
     -webkit-overflow-scrolling: touch;
 }
 @media (max-width: 768px){
-    .tbl-wrap{ max-height: 360px; }
+    .tbl-wrap{
+        max-height: 360px;
+    }
 }
-.tbl-wrap table{
+
+/* ===== Top(전체 지분당 가격) : 약 15행만 보이는 스크롤 박스 ===== */
+.tbl-wrap-15{
+    width: 100%;
+    max-height: 460px;      /* PC 기준: 약 15행 */
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+}
+@media (max-width: 768px){
+    .tbl-wrap-15{
+        max-height: 320px;  /* 모바일 기준: 약 15행 */
+    }
+}
+
+/* ===== 표 공통 스타일 (tbl-wrap / tbl-wrap-15 모두 적용) ===== */
+.tbl-wrap table,
+.tbl-wrap-15 table{
     width: 100% !important;
     table-layout: fixed !important;
     border-collapse: collapse;
 }
-.tbl-wrap th, .tbl-wrap td{
+.tbl-wrap th, .tbl-wrap td,
+.tbl-wrap-15 th, .tbl-wrap-15 td{
     text-align: center !important;
     vertical-align: middle !important;
     border: 1px solid rgba(0,0,0,0.10);
@@ -718,16 +735,19 @@ div[data-testid="stIFrame"] iframe {
     overflow-wrap: anywhere;
     word-break: break-word;
 }
-.tbl-wrap th{
+.tbl-wrap th,
+.tbl-wrap-15 th{
     background: rgba(0,0,0,0.03);
     font-weight: 800;
 }
 @media (max-width: 768px){
-    .tbl-wrap th, .tbl-wrap td{
+    .tbl-wrap th, .tbl-wrap td,
+    .tbl-wrap-15 th, .tbl-wrap-15 td{
         padding: 3px 2px;
         font-size: 10.5px;
     }
 }
+
 </style>
     """,
     unsafe_allow_html=True,
@@ -825,8 +845,20 @@ df_view["지분당가격_num"] = df_view.apply(
 df_view["가격(억)"] = df_view["가격_eok_num"].map(fmt_eok)
 df_view["지분당 가격"] = df_view["지분당가격_num"].map(fmt_eok)
 
+# 지도/마커용 데이터프레임(좌표가 있는 매물만)
 df_map = df_view.dropna(subset=["위도", "경도"]).copy()
-gdf = build_grouped(df_map)
+
+# 그룹(동 단위 포인트)
+gdf = (
+    df_map.groupby(["단지명", "동_key"], dropna=False)
+    .agg(
+        구역=("구역", "first"),
+        위도=("위도", "first"),
+        경도=("경도", "first"),
+        활성건수=("동_key", "size"),
+    )
+    .reset_index()
+)
 
 palette = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -934,9 +966,9 @@ complex_name = meta["단지명"]
 area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 
 # =========================
-# (0) 전체지역: 지분당 가격 TOP 20 (싼 순)
+# (0) 전체지역: 지분당 가격 (싼 순) - 15행 노출 박스 + 스크롤로 전체
 # =========================
-st.subheader("지분당 가격 TOP 20 (싼 순) - 전체지역/전체평형")
+st.subheader("지분당 가격 (싼 순) - 전체지역/전체평형")
 
 df_top = df_view.copy()
 df_top = df_top[df_top["지분당가격_num"].notna()].copy()
@@ -945,7 +977,7 @@ df_top = df_top[df_top["지분당가격_num"] > 0].copy()
 if df_top.empty:
     st.info("지분당 가격을 계산할 수 있는 매물이 없습니다. (가격/대지지분 값 확인 필요)")
 else:
-    df_top = df_top.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True]).head(20).copy()
+    df_top = df_top.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True]).copy()
 
     top_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "지분당 가격"]
     top_cols = [c for c in top_cols if c in df_top.columns]
@@ -964,6 +996,7 @@ else:
             "가격(억)": "14%",
             "지분당 가격": "20%",
         },
+        wrapper_class="tbl-wrap-15",
     )
 
 st.divider()
