@@ -984,21 +984,24 @@ area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 clicked_dong_key = str(meta.get("동_key", "")).strip()
 
 # =========================
-# (0) 마커 클릭 시: 지분당 가격 TOP 20 (싼 순)
+# (0) 전체지역: 지분당 가격 TOP 20 (싼 순)
 # =========================
-st.subheader("지분당 가격 TOP 20 (싼 순)")
+st.subheader("지분당 가격 TOP 20 (싼 순) - 전체지역/전체평형")
 
-df_top = df_view[df_view["단지명"] == complex_name].copy()
-if clicked_dong_key:
-    df_top = df_top[df_top["동_key"].astype(str) == clicked_dong_key].copy()
+df_top = df_view.copy()
 
+# 지분당가격 계산 가능한 것만
 df_top = df_top[df_top["지분당가격_num"].notna()].copy()
+
+# (선택) 0 또는 비정상값 방지
+df_top = df_top[df_top["지분당가격_num"] > 0].copy()
 
 if df_top.empty:
     st.info("지분당 가격을 계산할 수 있는 매물이 없습니다. (가격/대지지분 값 확인 필요)")
 else:
-    df_top = df_top.sort_values("지분당가격_num", ascending=True).head(20).copy()
-    top_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "지분당 가격"]
+    df_top = df_top.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True]).head(20).copy()
+
+    top_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "지분당 가격"]
     top_cols = [c for c in top_cols if c in df_top.columns]
 
     st_html_table(
@@ -1006,17 +1009,21 @@ else:
         default_max=10,
         max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8},
         col_widths={
+            "구역": "8%",
             "단지명": "20%",
             "평형": "10%",
             "대지지분": "12%",
             "동": "8%",
             "층": "8%",
-            "가격(억)": "18%",
-            "지분당 가격": "24%",
+            "가격(억)": "14%",
+            "지분당 가격": "20%",
         },
     )
 
 st.divider()
+
+
+
 
 # =========================
 # (1) 단지 + 평형 선택
