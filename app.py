@@ -609,7 +609,7 @@ st.set_page_config(layout="wide")
 col_title, col_promo = st.columns([3.3, 1.7])
 
 with col_title:
-    st.markdown('<div class="app-title"><h1>압구정동 매물 지도</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-title"><h1>압구정동 시세 지도</h1></div>', unsafe_allow_html=True)
 
 with col_promo:
     st.markdown(
