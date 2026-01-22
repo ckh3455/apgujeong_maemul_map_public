@@ -1,7 +1,6 @@
 import os
 import json
 import re
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,11 +13,12 @@ from google.oauth2.service_account import Credentials
 
 
 # =========================
-# 공개용 컬럼 Allowlist
+# 공개용 컬럼 Allowlist (대외비 컬럼 제외)
+#  - 요약내용: 대외비이므로 로드/표시 모두 제외
 # =========================
 LISTING_ALLOW_COLUMNS = [
     "상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격",
-    "요약내용", "위도", "경도",
+    "위도", "경도",
     # 필요 시 노출(민감하면 제거): "부동산",
 ]
 
@@ -129,19 +129,6 @@ def fmt_decimal(x, nd=2) -> str:
     return f"{num:.{nd}f}".rstrip("0").rstrip(".")
 
 
-def dataframe_height(df: pd.DataFrame, max_height: int = 700, row_height: int = 34, header_height: int = 42) -> int:
-    n = 0 if df is None else int(len(df))
-    h = header_height + (n * row_height)
-    return max(160, min(h, max_height))
-
-
-def st_df(obj, **kwargs):
-    try:
-        return st.dataframe(obj, hide_index=True, **kwargs)
-    except TypeError:
-        return st.dataframe(obj, **kwargs)
-
-
 def compact_strings(df: "pd.DataFrame", max_len_by_col: dict | None = None, default_max: int = 10) -> "pd.DataFrame":
     """문자열 컬럼 축약(…): 모바일 폭 최적화"""
     if df is None or getattr(df, "empty", False):
@@ -199,18 +186,6 @@ def st_html_table(
         html = re.sub(r"(<table[^>]*>)", r"\1" + colgroup, html, count=1)
 
     st.markdown(f'<div class="{wrapper_class}">{html}</div>', unsafe_allow_html=True)
-
-
-def to_eok_display(value) -> str:
-    """원 단위면 억으로 환산, 이미 억이면 그대로(표시만)"""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    num = pd.to_numeric(value, errors="coerce")
-    if pd.isna(num):
-        return ""
-    if num >= 1e8:
-        num = num / 1e8
-    return fmt_decimal(num, nd=2)
 
 
 # =========================
@@ -395,6 +370,7 @@ def load_data():
     df_loc = clean_columns(df_loc)
     df_trade = clean_columns(df_trade)
 
+    # 대외비 컬럼(요약내용)은 allowlist에 없으므로 로드/표시되지 않음
     df_list = keep_allow_columns(df_list, LISTING_ALLOW_COLUMNS)
     df_loc = keep_allow_columns(df_loc, LOC_ALLOW_COLUMNS)
     df_trade = keep_allow_columns(df_trade, TRADE_ALLOW_COLUMNS)
@@ -503,7 +479,6 @@ def extract_floor_from_ho(x) -> str:
 def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int = 60) -> pd.DataFrame:
     """
     group_cols 기준으로 매물건수/최저/최고(억) 요약 테이블 생성
-    - df에는 가격_eok_num 또는 가격_num(억)이 있어야 함
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -533,6 +508,10 @@ def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int
 
 
 def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, df_ref_share: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
+    - 최신 날짜가 위(내림차순)로 보장
+    """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
 
@@ -558,6 +537,7 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     s = s.str.replace(r"\s+", "", regex=True)
     t["_dt"] = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
 
+    # 최신 날짜가 위로 오도록 내림차순 정렬
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
     price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
@@ -608,6 +588,10 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     out["구역"] = t["구역"].astype(str) if "구역" in t.columns else ""
     out["동"] = t["동"].astype(str) if "동" in t.columns else ""
     out["층"] = t["층"].astype(str)
+
+    # out에서도 명시적으로 최신순 보장
+    out["_dt"] = t["_dt"].values
+    out = out.sort_values("_dt", ascending=False).drop(columns=["_dt"]).reset_index(drop=True)
 
     return out[["날짜", "단지", "평형", "가격(억)", "지분당 가격", "구역", "동", "층"]]
 
@@ -684,25 +668,6 @@ if st.button("데이터 새로고침"):
 
 # ====== Load ======
 df_list, df_loc, df_trade, _client_email = load_data()
-
-# --- 요약내용 컬럼명 표준화/보장 ---
-df_list = df_list.copy()
-rename_map = {}
-for c in df_list.columns:
-    c0 = str(c)
-    c_norm = re.sub(r"\s+", "", c0)
-    if c_norm == "요약내용" or ("요약" in c_norm and "내용" in c_norm):
-        rename_map[c] = "요약내용"
-
-if rename_map:
-    df_list.rename(columns=rename_map, inplace=True)
-
-summary_src = pick_first_existing_column(df_list, ["요약내용", "요약 내용", "요약", "설명", "비고", "메모"])
-if "요약내용" not in df_list.columns:
-    df_list["요약내용"] = df_list[summary_src] if summary_src else ""
-elif summary_src and summary_src != "요약내용":
-    left = df_list["요약내용"].astype(str).str.strip()
-    df_list.loc[left.eq(""), "요약내용"] = df_list.loc[left.eq(""), summary_src]
 
 need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층수", "가격", "상태"]
 missing = [c for c in need_cols if c not in df_list.columns]
@@ -826,7 +791,13 @@ m = folium.Map(
 
 marker_rows = []
 for _, r in gdf.iterrows():
-    marker_rows.append((r["위도"], r["경도"], {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]}))
+    marker_rows.append(
+        (
+            r["위도"],
+            r["경도"],
+            {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]},
+        )
+    )
 
 for _, r in gdf.iterrows():
     area_raw = str(r["구역"]) if pd.notna(r["구역"]) else ""
@@ -835,8 +806,21 @@ for _, r in gdf.iterrows():
     area_display = f"{norm_area(area_raw)}구역" if norm_area(area_raw) else ""
     tooltip = f"{area_display} | {r['단지명']} {dong_label}동 | 활성 {int(r['활성건수'])}건"
 
-    folium.CircleMarker(location=[r["위도"], r["경도"]], radius=18, weight=0, opacity=0, fill=True, fill_opacity=0, tooltip=tooltip).add_to(m)
-    folium.Marker(location=[r["위도"], r["경도"]], icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)), tooltip=tooltip).add_to(m)
+    folium.CircleMarker(
+        location=[r["위도"], r["경도"]],
+        radius=18,
+        weight=0,
+        opacity=0,
+        fill=True,
+        fill_opacity=0,
+        tooltip=tooltip,
+    ).add_to(m)
+
+    folium.Marker(
+        location=[r["위도"], r["경도"]],
+        icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)),
+        tooltip=tooltip,
+    ).add_to(m)
 
 st.subheader("지도")
 out = st_folium(m, height=550, width=None, returned_objects=["last_object_clicked"], key="map")
@@ -860,7 +844,8 @@ if out:
 # =========================
 # 상단(맵 아래) 3단 버튼 필터 UI
 # =========================
-st.subheader("빠른 필터 (마커 클릭 없이 바로 조회)")
+st.subheader("필터를 선택하면 해당 데이터가 출력됩니다")
+st.write("매물 시세는 호가입니다.")
 
 if "top_filter_mode" not in st.session_state:
     st.session_state["top_filter_mode"] = "area"
@@ -885,7 +870,15 @@ for i, a in enumerate(["1", "2", "3", "4", "5", "6"], start=1):
 # 2) 평형대
 row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
 row[0].markdown("**평형대별**")
-size_labels = [("20", "20평대"), ("30", "30평대"), ("40", "40평대"), ("50", "50평대"), ("60", "60평대"), ("70", "70평대"), ("80+", "80평대이상")]
+size_labels = [
+    ("20", "20평대"),
+    ("30", "30평대"),
+    ("40", "40평대"),
+    ("50", "50평대"),
+    ("60", "60평대"),
+    ("70", "70평대"),
+    ("80+", "80평대이상"),
+]
 for i, (v, txt) in enumerate(size_labels, start=1):
     is_sel = (st.session_state["top_filter_mode"] == "size" and st.session_state["top_filter_value"] == v)
     shown = f"✓ {txt}" if is_sel else txt
@@ -895,7 +888,15 @@ for i, (v, txt) in enumerate(size_labels, start=1):
 # 3) 금액대
 row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
 row[0].markdown("**금액대별**")
-price_labels = [("40", "40억대"), ("50", "50억대"), ("60", "60억대"), ("70", "70억대"), ("80", "80억대"), ("90", "90억대"), ("100+", "100억 이상")]
+price_labels = [
+    ("40", "40억대"),
+    ("50", "50억대"),
+    ("60", "60억대"),
+    ("70", "70억대"),
+    ("80", "80억대"),
+    ("90", "90억대"),
+    ("100+", "100억 이상"),
+]
 for i, (v, txt) in enumerate(price_labels, start=1):
     is_sel = (st.session_state["top_filter_mode"] == "price" and st.session_state["top_filter_value"] == v)
     shown = f"✓ {txt}" if is_sel else txt
@@ -905,7 +906,7 @@ for i, (v, txt) in enumerate(price_labels, start=1):
 st.divider()
 
 # =========================
-# (NEW) 필터 적용 + 요약 + 결과표 + 거래내역
+# 필터 적용 + 요약 + 결과표 + 거래내역
 # =========================
 mode = st.session_state["top_filter_mode"]
 val = st.session_state["top_filter_value"]
@@ -974,6 +975,7 @@ else:
 
     st.divider()
 
+    # 대외비 컬럼(요약내용) 미포함: 출력 컬럼 명시
     show_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
     show_cols = [c for c in show_cols if c in df_f.columns]
 
@@ -1031,6 +1033,7 @@ st.divider()
 
 # =========================
 # (마커 클릭 상세) 마커 클릭 시에만 표시
+#  - 대외비(요약내용) 절대 출력하지 않음
 # =========================
 meta = st.session_state.get("selected_meta", None)
 
@@ -1057,14 +1060,15 @@ else:
 
         df_pick = df_pick.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True], na_position="last").reset_index(drop=True)
 
-        show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격", "요약내용"]
+        # 대외비(요약내용) 미포함: 출력 컬럼 명시
+        show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
         if "부동산" in df_pick.columns:
             show_cols.insert(show_cols.index("가격(억)") + 1, "부동산")
         show_cols = [c for c in show_cols if c in df_pick.columns]
 
         st_html_table(
             df_pick[show_cols].reset_index(drop=True),
-            max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8, "부동산": 8, "요약내용": 12},
+            max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8, "부동산": 8},
             default_max=10,
         )
 
