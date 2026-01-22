@@ -7,6 +7,11 @@ import streamlit as st
 
 import folium
 from streamlit_folium import st_folium
+try:
+    # 일부 환경에서 st_folium 컴포넌트 로딩 실패 시 정적 렌더 fallback 용
+    from streamlit_folium import folium_static
+except Exception:
+    folium_static = None
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -247,6 +252,139 @@ def pick_first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str |
     return None
 
 
+# =========================
+# 날짜 파싱(거래내역) 강화: 누락/정렬 오류 방지
+# =========================
+def _yy_to_year(yy: int) -> int:
+    # 2자리 연도 pivot: 70~99 => 1900대, 0~69 => 2000대
+    return 1900 + yy if yy >= 70 else 2000 + yy
+
+
+def parse_trade_date_one(x) -> pd.Timestamp:
+    """
+    '25.09.30', '2025.09.30', '25/9/30', '2025-9-30', '20250930' 등 최대한 흡수.
+    실패 시 NaT.
+    """
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return pd.NaT
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return pd.NaT
+
+    # 숫자만 8자리: YYYYMMDD
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 8:
+        try:
+            return pd.Timestamp(f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}")
+        except Exception:
+            pass
+
+    # 분리자 통일
+    s2 = re.sub(r"\s+", "", s)
+    s2 = re.sub(r"[./]", "-", s2)
+
+    # yyyy-m-d or yy-m-d
+    m = re.match(r"^(\d{2,4})-(\d{1,2})-(\d{1,2})$", s2)
+    if m:
+        y = int(m.group(1))
+        mo = int(m.group(2))
+        d = int(m.group(3))
+        if y < 100:
+            y = _yy_to_year(y)
+        try:
+            return pd.Timestamp(year=y, month=mo, day=d)
+        except Exception:
+            return pd.NaT
+
+    # 마지막 fallback: pandas 파서
+    try:
+        dt = pd.to_datetime(s2, errors="coerce", infer_datetime_format=True)
+        return dt
+    except Exception:
+        return pd.NaT
+
+
+def parse_trade_date_series(ser: pd.Series) -> pd.Series:
+    return ser.map(parse_trade_date_one)
+
+
+def extract_floor_from_level(x) -> str:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    s = str(x).strip()
+    m = re.search(r"(\d+)", s)
+    return m.group(1) if m else s
+
+
+def extract_floor_from_ho(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return ""
+
+    if "층" in s:
+        m = re.search(r"(\d+)\s*층", s)
+        if m:
+            return f"{int(m.group(1))}층"
+        m2 = re.search(r"(\d+)", s)
+        return f"{int(m2.group(1))}층" if m2 else s
+
+    if "/" in s or "-" in s:
+        m = re.search(r"(\d+)", s)
+        if m:
+            return f"{int(m.group(1))}층"
+        return ""
+
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return ""
+    if len(digits) >= 3:
+        floor_digits = digits[:-2]
+        try:
+            return f"{int(floor_digits)}층"
+        except Exception:
+            return ""
+    try:
+        return f"{int(digits)}층"
+    except Exception:
+        return ""
+
+
+def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int = 60) -> pd.DataFrame:
+    """
+    group_cols 기준으로 매물건수/최저/최고(억) 요약 테이블 생성
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    price_col = "가격_eok_num" if "가격_eok_num" in df.columns else ("가격_num" if "가격_num" in df.columns else None)
+    if not price_col:
+        return pd.DataFrame()
+
+    g = (
+        df.groupby(group_cols, dropna=False)
+        .agg(
+            매물건수=(price_col, "size"),
+            최저가격=(price_col, "min"),
+            최고가격=(price_col, "max"),
+        )
+        .reset_index()
+    )
+
+    g["가격대(최저~최고)"] = g["최저가격"].map(fmt_eok) + "억 ~ " + g["최고가격"].map(fmt_eok) + "억"
+    g = g.sort_values(["최저가격", "매물건수"], ascending=[True, False]).reset_index(drop=True)
+
+    if top_n is not None and len(g) > int(top_n):
+        g = g.head(int(top_n)).copy()
+
+    cols = [c for c in group_cols if c in g.columns] + ["매물건수", "가격대(최저~최고)"]
+    return g[cols]
+
+
+# =========================
+# Google Sheets helpers
+# =========================
 def extract_spreadsheet_id(url_or_id: str) -> str:
     if not url_or_id:
         return ""
@@ -378,45 +516,6 @@ def load_data():
     return df_list, df_loc, df_trade, sa.get("client_email", "")
 
 
-def summarize_area_by_size(df_active: pd.DataFrame, area_value: str) -> pd.DataFrame:
-    if not area_value:
-        return pd.DataFrame()
-
-    target = norm_area(area_value)
-    df_area = df_active.copy()
-    df_area["_area_norm"] = df_area["구역"].astype(str).map(norm_area)
-    df_area = df_area[df_area["_area_norm"] == target].copy()
-    if df_area.empty:
-        return pd.DataFrame()
-
-    size_key = "평형대" if "평형대" in df_area.columns else ("평형" if "평형" in df_area.columns else None)
-    if not size_key:
-        return pd.DataFrame()
-
-    if "가격_num" not in df_area.columns:
-        df_area["가격_num"] = df_area["가격"].map(price_to_eok_num)
-
-    s = (
-        df_area.groupby(size_key, dropna=False)
-        .agg(
-            매물건수=("가격_num", "size"),
-            최저가격=("가격_num", "min"),
-            최고가격=("가격_num", "max"),
-        )
-        .reset_index()
-        .rename(columns={size_key: "평형"})
-    )
-
-    s["평형_sort"] = s["평형"].astype(str)
-    s = s.sort_values(by="평형_sort").drop(columns=["평형_sort"]).reset_index(drop=True)
-
-    for c in ["최저가격", "최고가격"]:
-        s[c] = s[c].round(2)
-
-    s["가격대(최저~최고)"] = s["최저가격"].map(fmt_eok) + " ~ " + s["최고가격"].map(fmt_eok)
-    return s
-
-
 def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
     if clicked_lat is None or clicked_lng is None:
         return None
@@ -433,84 +532,11 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
     return best_meta
 
 
-def extract_floor_from_level(x) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    m = re.search(r"(\d+)", s)
-    return m.group(1) if m else s
-
-
-def extract_floor_from_ho(x) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return ""
-
-    if "층" in s:
-        m = re.search(r"(\d+)\s*층", s)
-        if m:
-            return f"{int(m.group(1))}층"
-        m2 = re.search(r"(\d+)", s)
-        return f"{int(m2.group(1))}층" if m2 else s
-
-    if "/" in s or "-" in s:
-        m = re.search(r"(\d+)", s)
-        if m:
-            return f"{int(m.group(1))}층"
-        return ""
-
-    digits = re.sub(r"\D", "", s)
-    if not digits:
-        return ""
-    if len(digits) >= 3:
-        floor_digits = digits[:-2]
-        try:
-            return f"{int(floor_digits)}층"
-        except Exception:
-            return ""
-    try:
-        return f"{int(digits)}층"
-    except Exception:
-        return ""
-
-
-def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int = 60) -> pd.DataFrame:
-    """
-    group_cols 기준으로 매물건수/최저/최고(억) 요약 테이블 생성
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    price_col = "가격_eok_num" if "가격_eok_num" in df.columns else ("가격_num" if "가격_num" in df.columns else None)
-    if not price_col:
-        return pd.DataFrame()
-
-    g = (
-        df.groupby(group_cols, dropna=False)
-        .agg(
-            매물건수=(price_col, "size"),
-            최저가격=(price_col, "min"),
-            최고가격=(price_col, "max"),
-        )
-        .reset_index()
-    )
-
-    g["가격대(최저~최고)"] = g["최저가격"].map(fmt_eok) + "억 ~ " + g["최고가격"].map(fmt_eok) + "억"
-    g = g.sort_values(["최저가격", "매물건수"], ascending=[True, False]).reset_index(drop=True)
-
-    if top_n is not None and len(g) > int(top_n):
-        g = g.head(int(top_n)).copy()
-
-    cols = [c for c in group_cols if c in g.columns] + ["매물건수", "가격대(최저~최고)"]
-    return g[cols]
-
-
 def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, df_ref_share: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
     - 최신 날짜가 위(내림차순)로 보장
+    - 날짜 파싱 강화로 누락 최소화
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
@@ -532,13 +558,12 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     if t.empty:
         return pd.DataFrame()
 
-    s = t[col_date].astype(str).str.strip()
-    s = s.str.replace(r"[./]", "-", regex=True)
-    s = s.str.replace(r"\s+", "", regex=True)
-    t["_dt"] = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+    # 날짜 파싱 강화
+    t["_dt"] = parse_trade_date_series(t[col_date])
 
-    # 최신 날짜가 위로 오도록 내림차순 정렬
-    t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
+    # 최신이 위로 오도록 정렬 후 5건
+    # (NaT는 가장 아래로 보내기)
+    t = t.sort_values(["_dt"], ascending=[False], na_position="last").head(5).copy()
 
     price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
     if price_col:
@@ -555,6 +580,7 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     else:
         t["층"] = ""
 
+    # 지분당 가격(매물 목록에서 지분 매핑)
     t["_share_num"] = None
     if df_ref_share is not None and not df_ref_share.empty:
         ref = df_ref_share.copy()
@@ -589,9 +615,9 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     out["동"] = t["동"].astype(str) if "동" in t.columns else ""
     out["층"] = t["층"].astype(str)
 
-    # out에서도 명시적으로 최신순 보장
+    # out에서도 최신순 보장(파싱 결과 기반)
     out["_dt"] = t["_dt"].values
-    out = out.sort_values("_dt", ascending=False).drop(columns=["_dt"]).reset_index(drop=True)
+    out = out.sort_values("_dt", ascending=False, na_position="last").drop(columns=["_dt"]).reset_index(drop=True)
 
     return out[["날짜", "단지", "평형", "가격(억)", "지분당 가격", "구역", "동", "층"]]
 
@@ -823,7 +849,19 @@ for _, r in gdf.iterrows():
     ).add_to(m)
 
 st.subheader("지도")
-out = st_folium(m, height=550, width=None, returned_objects=["last_object_clicked"], key="map")
+
+# st_folium 컴포넌트 로딩 실패 시 정적 지도 fallback
+out = {}
+try:
+    out = st_folium(m, height=550, width=None, returned_objects=["last_object_clicked"], key="map")
+except Exception:
+    st.warning("지도 컴포넌트 로딩이 불안정하여 정적 지도로 표시합니다.")
+    if folium_static is not None:
+        folium_static(m, width=None, height=550)
+    else:
+        # 최후 fallback(정적 HTML)
+        st.components.v1.html(m._repr_html_(), height=550, scrolling=False)
+    out = {}
 
 if out:
     clicked = out.get("last_object_clicked", None)
@@ -975,7 +1013,7 @@ else:
 
     st.divider()
 
-    # 대외비 컬럼(요약내용) 미포함: 출력 컬럼 명시
+    # 대외비 컬럼(요약내용) 미포함
     show_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
     show_cols = [c for c in show_cols if c in df_f.columns]
 
@@ -1041,7 +1079,6 @@ if not meta:
     st.info("마커를 클릭하면 단지/평형 상세(선택 단지/평형, 해당 단지 거래내역 등)도 볼 수 있습니다. (상단 필터는 클릭 없이 사용 가능)")
 else:
     complex_name = meta["단지명"]
-    area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 
     st.subheader("선택 단지/평형의 매물시세")
     df_complex = df_view[df_view["단지명"] == complex_name].copy()
@@ -1060,7 +1097,6 @@ else:
 
         df_pick = df_pick.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True], na_position="last").reset_index(drop=True)
 
-        # 대외비(요약내용) 미포함: 출력 컬럼 명시
         show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
         if "부동산" in df_pick.columns:
             show_cols.insert(show_cols.index("가격(억)") + 1, "부동산")
@@ -1080,19 +1116,6 @@ else:
             st.info("일치하는 거래내역이 없습니다.")
         else:
             st_html_table(trades.reset_index(drop=True), default_max=12)
-
-        st.divider()
-
-        st.subheader("선택 구역 평형별 시세")
-        if not area_value:
-            st.info("선택한 마커의 구역 정보가 없습니다.")
-        else:
-            summary = summarize_area_by_size(df_view, area_value)
-            if summary.empty:
-                st.info("해당 구역에서 요약할 데이터가 없습니다.")
-            else:
-                summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]].reset_index(drop=True)
-                st_html_table(summary_view, default_max=12)
 
 st.divider()
 
