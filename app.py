@@ -175,11 +175,7 @@ def st_html_table(
     col_widths: dict | None = None,
     wrapper_class: str = "tbl-wrap",
 ):
-    """Streamlit 표를 HTML로 렌더링 (가운데 정렬 + 스크롤 컨테이너).
-    - 문자열 컬럼은 compact_strings로 축약
-    - col_widths로 열별 width 강제
-    - wrapper_class로 컨테이너 높이/스크롤 정책 제어
-    """
+    """Streamlit 표를 HTML로 렌더링 (가운데 정렬 + 스크롤 컨테이너)."""
     if df is None or getattr(df, "empty", False):
         st.info("표로 표시할 데이터가 없습니다.")
         return
@@ -218,7 +214,7 @@ def to_eok_display(value) -> str:
 
 
 # =========================
-# 숫자/가격(억)/지분당 가격 계산 유틸
+# 숫자/가격(억)/지분당/평당 가격 계산 유틸
 # =========================
 def parse_numeric_any(x) -> float | None:
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -504,12 +500,39 @@ def extract_floor_from_ho(x) -> str:
         return ""
 
 
+def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int = 60) -> pd.DataFrame:
+    """
+    group_cols 기준으로 매물건수/최저/최고(억) 요약 테이블 생성
+    - df에는 가격_eok_num 또는 가격_num(억)이 있어야 함
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    price_col = "가격_eok_num" if "가격_eok_num" in df.columns else ("가격_num" if "가격_num" in df.columns else None)
+    if not price_col:
+        return pd.DataFrame()
+
+    g = (
+        df.groupby(group_cols, dropna=False)
+        .agg(
+            매물건수=(price_col, "size"),
+            최저가격=(price_col, "min"),
+            최고가격=(price_col, "max"),
+        )
+        .reset_index()
+    )
+
+    g["가격대(최저~최고)"] = g["최저가격"].map(fmt_eok) + "억 ~ " + g["최고가격"].map(fmt_eok) + "억"
+    g = g.sort_values(["최저가격", "매물건수"], ascending=[True, False]).reset_index(drop=True)
+
+    if top_n is not None and len(g) > int(top_n):
+        g = g.head(int(top_n)).copy()
+
+    cols = [c for c in group_cols if c in g.columns] + ["매물건수", "가격대(최저~최고)"]
+    return g[cols]
+
+
 def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, df_ref_share: pd.DataFrame | None = None) -> pd.DataFrame:
-    """
-    - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
-    - 출력 컬럼: 날짜, 단지, 평형, 가격(억), 지분당 가격, 구역, 동, 층
-    - 지분당 가격은 df_ref_share에서 (단지명+평형) 대표 대지지분을 매핑해 계산
-    """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
 
@@ -530,7 +553,6 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     if t.empty:
         return pd.DataFrame()
 
-    # 날짜 파싱(여러 포맷 대응)
     s = t[col_date].astype(str).str.strip()
     s = s.str.replace(r"[./]", "-", regex=True)
     s = s.str.replace(r"\s+", "", regex=True)
@@ -553,7 +575,6 @@ def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, 
     else:
         t["층"] = ""
 
-    # 지분당 가격(매물 목록에서 지분 매핑)
     t["_share_num"] = None
     if df_ref_share is not None and not df_ref_share.empty:
         ref = df_ref_share.copy()
@@ -617,140 +638,39 @@ with col_promo:
 st.markdown(
     """
 <style>
-
 /* ===== Header title & Promo card ===== */
-.app-title h1{
-    margin: 0;
-    padding: 0;
-    font-size: 56px;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-    color: #2b2f36;
-}
-.promo-card{
-    border: 1px solid rgba(0,0,0,0.10);
-    border-radius: 14px;
-    padding: 14px 16px;
-    background: #ffffff;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
-}
-.promo-name{
-    font-size: 18px;
-    font-weight: 800;
-    margin: 0 0 6px 0;
-}
-.promo-desc{
-    font-size: 14px;
-    font-weight: 600;
-    color: #2b2f36;
-    margin: 0 0 10px 0;
-}
-.promo-label{
-    font-size: 13px;
-    font-weight: 800;
-    margin: 0 0 2px 0;
-}
-.promo-contact{
-    font-size: 13px;
-    font-weight: 600;
-    color: #2b2f36;
-    margin: 0;
-    line-height: 1.4;
-}
-.promo-sub{
-    font-size: 12px;
-    color: rgba(0,0,0,0.55);
-    margin: 8px 0 0 0;
-}
+.app-title h1{margin:0;padding:0;font-size:56px;font-weight:800;letter-spacing:-0.5px;color:#2b2f36;}
+.promo-card{border:1px solid rgba(0,0,0,0.10);border-radius:14px;padding:14px 16px;background:#ffffff;box-shadow:0 2px 10px rgba(0,0,0,0.06);}
+.promo-name{font-size:18px;font-weight:800;margin:0 0 6px 0;}
+.promo-desc{font-size:14px;font-weight:600;color:#2b2f36;margin:0 0 10px 0;}
+.promo-label{font-size:13px;font-weight:800;margin:0 0 2px 0;}
+.promo-contact{font-size:13px;font-weight:600;color:#2b2f36;margin:0;line-height:1.4;}
+.promo-sub{font-size:12px;color:rgba(0,0,0,0.55);margin:8px 0 0 0;}
 
 /* ===== 지도 높이 (20% 증가) ===== */
-div[data-testid="stIFrame"],
-div[data-testid="stIFrame"] iframe {
-    height: 550px !important;  /* 455 * 1.2 ≈ 546 */
-    width: 100% !important;
-}
-@media (max-width: 768px) {
-    div[data-testid="stIFrame"],
-    div[data-testid="stIFrame"] iframe {
-        height: 360px !important; /* 300 * 1.2 = 360 */
-    }
-}
+div[data-testid="stIFrame"], div[data-testid="stIFrame"] iframe {height:550px !important;width:100% !important;}
+@media (max-width:768px){div[data-testid="stIFrame"], div[data-testid="stIFrame"] iframe {height:360px !important;}}
 
-/* ===== 기본 표 래퍼 ===== */
-.tbl-wrap{
-    width: 100%;
-    max-height: 520px;
-    overflow-y: auto;
-    overflow-x: hidden;
-    -webkit-overflow-scrolling: touch;
+/* ===== 표 래퍼 ===== */
+.tbl-wrap{width:100%;max-height:520px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}
+@media (max-width:768px){.tbl-wrap{max-height:360px;}}
+.tbl-wrap-15{width:100%;max-height:460px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}
+@media (max-width:768px){.tbl-wrap-15{max-height:320px;}}
+.tbl-wrap table, .tbl-wrap-15 table{width:100% !important;table-layout:fixed !important;border-collapse:collapse;}
+.tbl-wrap th, .tbl-wrap td, .tbl-wrap-15 th, .tbl-wrap-15 td{
+    text-align:center !important;vertical-align:middle !important;border:1px solid rgba(0,0,0,0.10);
+    padding:5px 3px;font-size:12px;line-height:1.25;max-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word;
 }
-@media (max-width: 768px){
-    .tbl-wrap{
-        max-height: 360px;
-    }
-}
-
-/* ===== Top(전체 지분당 가격) : 약 15행만 보이는 스크롤 박스 ===== */
-.tbl-wrap-15{
-    width: 100%;
-    max-height: 460px;      /* PC 기준: 약 15행 */
-    overflow-y: auto;
-    overflow-x: hidden;
-    -webkit-overflow-scrolling: touch;
-}
-@media (max-width: 768px){
-    .tbl-wrap-15{
-        max-height: 320px;  /* 모바일 기준: 약 15행 */
-    }
-}
-
-/* ===== 표 공통 스타일 (tbl-wrap / tbl-wrap-15 모두 적용) ===== */
-.tbl-wrap table,
-.tbl-wrap-15 table{
-    width: 100% !important;
-    table-layout: fixed !important;
-    border-collapse: collapse;
-}
-.tbl-wrap th, .tbl-wrap td,
-.tbl-wrap-15 th, .tbl-wrap-15 td{
-    text-align: center !important;
-    vertical-align: middle !important;
-    border: 1px solid rgba(0,0,0,0.10);
-    padding: 5px 3px;
-    font-size: 12px;
-    line-height: 1.25;
-    max-width: 0;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    word-break: break-word;
-}
-.tbl-wrap th,
-.tbl-wrap-15 th{
-    background: rgba(0,0,0,0.03);
-    font-weight: 800;
-}
-@media (max-width: 768px){
-    .tbl-wrap th, .tbl-wrap td,
-    .tbl-wrap-15 th, .tbl-wrap-15 td{
-        padding: 3px 2px;
-        font-size: 10.5px;
-    }
-}
+.tbl-wrap th, .tbl-wrap-15 th{background:rgba(0,0,0,0.03);font-weight:800;}
+@media (max-width:768px){.tbl-wrap th, .tbl-wrap td, .tbl-wrap-15 th, .tbl-wrap-15 td{padding:3px 2px;font-size:10.5px;}}
 
 /* ===== 상단 필터 버튼 (모바일 줄밀림 방지) ===== */
 div[data-testid="stButton"] > button{
-    padding: 0.35rem 0.25rem !important;
-    font-size: 0.82rem !important;
-    font-weight: 800 !important;
-    white-space: nowrap !important;
+    padding:0.35rem 0.25rem !important;font-size:0.82rem !important;font-weight:800 !important;white-space:nowrap !important;
 }
-@media (max-width: 768px){
-    div[data-testid="stButton"] > button{
-        padding: 0.28rem 0.18rem !important;
-        font-size: 0.74rem !important;
-    }
+@media (max-width:768px){
+    div[data-testid="stButton"] > button{padding:0.28rem 0.18rem !important;font-size:0.74rem !important;}
 }
-
 </style>
     """,
     unsafe_allow_html=True,
@@ -783,7 +703,6 @@ if "요약내용" not in df_list.columns:
 elif summary_src and summary_src != "요약내용":
     left = df_list["요약내용"].astype(str).str.strip()
     df_list.loc[left.eq(""), "요약내용"] = df_list.loc[left.eq(""), summary_src]
-# -------------------------------
 
 need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층수", "가격", "상태"]
 missing = [c for c in need_cols if c not in df_list.columns]
@@ -841,7 +760,6 @@ df_view["평_num_for_ppy"] = df_view["평형_num"].fillna(df_view["평형대_num
 
 df_view["대지지분_num"] = df_view["대지지분"].map(parse_numeric_any)
 
-# 지분당가격
 df_view["지분당가격_num"] = df_view.apply(
     lambda r: (r["가격_eok_num"] / r["대지지분_num"])
     if (pd.notna(r.get("가격_eok_num")) and pd.notna(r.get("대지지분_num")) and float(r["대지지분_num"]) != 0)
@@ -849,7 +767,6 @@ df_view["지분당가격_num"] = df_view.apply(
     axis=1,
 )
 
-# 평당가격(억/평)
 df_view["평당가격_num"] = df_view.apply(
     lambda r: (r["가격_eok_num"] / r["평_num_for_ppy"])
     if (pd.notna(r.get("가격_eok_num")) and pd.notna(r.get("평_num_for_ppy")) and float(r["평_num_for_ppy"]) != 0)
@@ -864,7 +781,6 @@ df_view["평당 가격"] = df_view["평당가격_num"].map(fmt_eok)
 # 지도/마커용 데이터프레임(좌표가 있는 매물만)
 df_map = df_view.dropna(subset=["위도", "경도"]).copy()
 
-# 그룹(동 단위 포인트)
 gdf = (
     df_map.groupby(["단지명", "동_key"], dropna=False)
     .agg(
@@ -883,7 +799,6 @@ palette = [
 areas = sorted([a for a in gdf["구역"].dropna().astype(str).unique()])
 area_color = {a: palette[i % len(palette)] for i, a in enumerate(areas)}
 default_color = "#333333"
-
 DEFAULT_ZOOM = 16
 
 if "map_center" not in st.session_state:
@@ -911,13 +826,7 @@ m = folium.Map(
 
 marker_rows = []
 for _, r in gdf.iterrows():
-    marker_rows.append(
-        (
-            r["위도"],
-            r["경도"],
-            {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]},
-        )
-    )
+    marker_rows.append((r["위도"], r["경도"], {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]}))
 
 for _, r in gdf.iterrows():
     area_raw = str(r["구역"]) if pd.notna(r["구역"]) else ""
@@ -926,30 +835,11 @@ for _, r in gdf.iterrows():
     area_display = f"{norm_area(area_raw)}구역" if norm_area(area_raw) else ""
     tooltip = f"{area_display} | {r['단지명']} {dong_label}동 | 활성 {int(r['활성건수'])}건"
 
-    folium.CircleMarker(
-        location=[r["위도"], r["경도"]],
-        radius=18,
-        weight=0,
-        opacity=0,
-        fill=True,
-        fill_opacity=0,
-        tooltip=tooltip,
-    ).add_to(m)
-
-    folium.Marker(
-        location=[r["위도"], r["경도"]],
-        icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)),
-        tooltip=tooltip,
-    ).add_to(m)
+    folium.CircleMarker(location=[r["위도"], r["경도"]], radius=18, weight=0, opacity=0, fill=True, fill_opacity=0, tooltip=tooltip).add_to(m)
+    folium.Marker(location=[r["위도"], r["경도"]], icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)), tooltip=tooltip).add_to(m)
 
 st.subheader("지도")
-out = st_folium(
-    m,
-    height=550,  # 20% 증가
-    width=None,
-    returned_objects=["last_object_clicked"],
-    key="map",
-)
+out = st_folium(m, height=550, width=None, returned_objects=["last_object_clicked"], key="map")
 
 if out:
     clicked = out.get("last_object_clicked", None)
@@ -968,7 +858,7 @@ if out:
                     st.rerun()
 
 # =========================
-# (NEW) 맵 아래 상단: 3단 버튼 필터 UI (마커 클릭 없이 사용)
+# 상단(맵 아래) 3단 버튼 필터 UI
 # =========================
 st.subheader("빠른 필터 (마커 클릭 없이 바로 조회)")
 
@@ -995,15 +885,7 @@ for i, a in enumerate(["1", "2", "3", "4", "5", "6"], start=1):
 # 2) 평형대
 row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
 row[0].markdown("**평형대별**")
-size_labels = [
-    ("20", "20평대"),
-    ("30", "30평대"),
-    ("40", "40평대"),
-    ("50", "50평대"),
-    ("60", "60평대"),
-    ("70", "70평대"),
-    ("80+", "80평대이상"),
-]
+size_labels = [("20", "20평대"), ("30", "30평대"), ("40", "40평대"), ("50", "50평대"), ("60", "60평대"), ("70", "70평대"), ("80+", "80평대이상")]
 for i, (v, txt) in enumerate(size_labels, start=1):
     is_sel = (st.session_state["top_filter_mode"] == "size" and st.session_state["top_filter_value"] == v)
     shown = f"✓ {txt}" if is_sel else txt
@@ -1013,15 +895,7 @@ for i, (v, txt) in enumerate(size_labels, start=1):
 # 3) 금액대
 row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
 row[0].markdown("**금액대별**")
-price_labels = [
-    ("40", "40억대"),
-    ("50", "50억대"),
-    ("60", "60억대"),
-    ("70", "70억대"),
-    ("80", "80억대"),
-    ("90", "90억대"),
-    ("100+", "100억 이상"),
-]
+price_labels = [("40", "40억대"), ("50", "50억대"), ("60", "60억대"), ("70", "70억대"), ("80", "80억대"), ("90", "90억대"), ("100+", "100억 이상")]
 for i, (v, txt) in enumerate(price_labels, start=1):
     is_sel = (st.session_state["top_filter_mode"] == "price" and st.session_state["top_filter_value"] == v)
     shown = f"✓ {txt}" if is_sel else txt
@@ -1031,7 +905,7 @@ for i, (v, txt) in enumerate(price_labels, start=1):
 st.divider()
 
 # =========================
-# (NEW) 필터 적용 + 결과 출력 + 해당 항목별 거래내역 5건씩 순차 출력
+# (NEW) 필터 적용 + 요약 + 결과표 + 거래내역
 # =========================
 mode = st.session_state["top_filter_mode"]
 val = st.session_state["top_filter_value"]
@@ -1065,10 +939,41 @@ st.subheader(title)
 if df_f.empty:
     st.info("조건에 맞는 매물이 없습니다.")
 else:
-    # 기본 정렬: 가격 낮은 순 → 지분당 낮은 순
     df_f = df_f.sort_values(["가격_num", "지분당가격_num"], ascending=[True, True]).reset_index(drop=True)
 
-    # 요청 컬럼: 단지명,평형,대지지분,동,층,가격,평당가격,지분당가격 (+구역)
+    total_cnt = len(df_f)
+    min_p = df_f["가격_eok_num"].min()
+    max_p = df_f["가격_eok_num"].max()
+
+    if mode == "area":
+        st.markdown(f"**요약:** {val}구역 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
+    elif mode == "size":
+        label = "80평대 이상" if val == "80+" else f"{val}평대"
+        st.markdown(f"**요약:** {label} 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
+    elif mode == "price":
+        label = "100억 이상" if val == "100+" else f"{val}억대"
+        st.markdown(f"**요약:** {label} 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
+
+    group_cols = [c for c in ["구역", "단지명", "평형"] if c in df_f.columns]
+    sum_tbl = summarize_listings_table(df_f, group_cols=group_cols, top_n=60)
+    if not sum_tbl.empty:
+        st.caption("단지/평형별 요약 (매물건수, 최저~최고)")
+        st_html_table(
+            sum_tbl,
+            default_max=14,
+            max_len_by_col={"단지명": 10, "평형": 6},
+            col_widths={
+                "구역": "10%",
+                "단지명": "32%",
+                "평형": "12%",
+                "매물건수": "14%",
+                "가격대(최저~최고)": "32%",
+            },
+            wrapper_class="tbl-wrap",
+        )
+
+    st.divider()
+
     show_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
     show_cols = [c for c in show_cols if c in df_f.columns]
 
@@ -1093,44 +998,39 @@ else:
     st.divider()
 
     st.subheader("거래내역 최근 5건 (해당 항목별 순차 출력)")
-
-    # 화면 폭주 방지용: 너무 많은 (단지명,평형) 조합이 잡히면 길어질 수 있어 상한을 둠
     MAX_KEYS_TO_SHOW = 20
     key_df = df_f[["단지명", "평형"]].astype(str).drop_duplicates().head(MAX_KEYS_TO_SHOW)
 
-    if len(key_df) == 0:
-        st.info("거래내역을 조회할 항목이 없습니다.")
-    else:
-        if len(df_f[["단지명", "평형"]].astype(str).drop_duplicates()) > MAX_KEYS_TO_SHOW:
-            st.caption(f"표시 항목이 많아 상위 {MAX_KEYS_TO_SHOW}개(단지/평형)만 거래내역을 출력합니다. (상한은 코드에서 조정 가능)")
+    if len(df_f[["단지명", "평형"]].astype(str).drop_duplicates()) > MAX_KEYS_TO_SHOW:
+        st.caption(f"표시 항목이 많아 상위 {MAX_KEYS_TO_SHOW}개(단지/평형)만 거래내역을 출력합니다.")
 
-        for idx, r in key_df.iterrows():
-            cx = r["단지명"]
-            py = r["평형"]
-            with st.expander(f"{cx} / {py} 거래내역", expanded=(idx == 0)):
-                tr = recent_trades(df_trade, cx, py, df_ref_share=df_view)
-                if tr.empty:
-                    st.info("일치하는 거래내역이 없습니다.")
-                else:
-                    st_html_table(
-                        tr.reset_index(drop=True),
-                        default_max=12,
-                        col_widths={
-                            "날짜": "14%",
-                            "단지": "22%",
-                            "평형": "10%",
-                            "가격(억)": "12%",
-                            "지분당 가격": "14%",
-                            "구역": "8%",
-                            "동": "8%",
-                            "층": "12%",
-                        },
-                    )
+    for idx, r in key_df.iterrows():
+        cx = r["단지명"]
+        py = r["평형"]
+        with st.expander(f"{cx} / {py} 거래내역", expanded=(idx == 0)):
+            tr = recent_trades(df_trade, cx, py, df_ref_share=df_view)
+            if tr.empty:
+                st.info("일치하는 거래내역이 없습니다.")
+            else:
+                st_html_table(
+                    tr.reset_index(drop=True),
+                    default_max=12,
+                    col_widths={
+                        "날짜": "14%",
+                        "단지": "22%",
+                        "평형": "10%",
+                        "가격(억)": "12%",
+                        "지분당 가격": "14%",
+                        "구역": "8%",
+                        "동": "8%",
+                        "층": "12%",
+                    },
+                )
 
 st.divider()
 
 # =========================
-# (기존) 마커 클릭 상세: 마커 클릭 시에만 표시 (stop 제거)
+# (마커 클릭 상세) 마커 클릭 시에만 표시
 # =========================
 meta = st.session_state.get("selected_meta", None)
 
@@ -1140,13 +1040,10 @@ else:
     complex_name = meta["단지명"]
     area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 
-    # =========================
-    # (1) 단지 + 평형 선택
-    # =========================
+    st.subheader("선택 단지/평형의 매물시세")
     df_complex = df_view[df_view["단지명"] == complex_name].copy()
     pyeong_candidates = sorted(df_complex["평형"].astype(str).str.strip().dropna().unique().tolist())
 
-    st.subheader("선택 단지/평형의 매물시세")
     if not pyeong_candidates:
         st.info("선택한 단지에서 평형 정보를 찾을 수 없습니다.")
     else:
@@ -1158,66 +1055,30 @@ else:
         df_pick["_size_norm"] = df_pick["평형"].astype(str).map(norm_size)
         df_pick = df_pick[df_pick["_size_norm"] == size_norm].copy()
 
-        df_pick = df_pick.sort_values(
-            ["지분당가격_num", "가격_num"],
-            ascending=[True, True],
-            na_position="last"
-        ).reset_index(drop=True)
+        df_pick = df_pick.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True], na_position="last").reset_index(drop=True)
 
         show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격", "요약내용"]
         if "부동산" in df_pick.columns:
             show_cols.insert(show_cols.index("가격(억)") + 1, "부동산")
         show_cols = [c for c in show_cols if c in df_pick.columns]
-        view_pick = df_pick[show_cols].reset_index(drop=True)
 
         st_html_table(
-            view_pick,
+            df_pick[show_cols].reset_index(drop=True),
             max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8, "부동산": 8, "요약내용": 12},
             default_max=10,
-            col_widths={
-                "단지명": "18%",
-                "평형": "10%",
-                "대지지분": "12%",
-                "동": "8%",
-                "층": "8%",
-                "가격(억)": "14%",
-                "평당 가격": "10%",
-                "지분당 가격": "10%",
-                "요약내용": "10%",
-                "부동산": "10%",
-            },
         )
 
         st.divider()
 
-        # =========================
-        # (2) 거래내역 최근 5건 (+지분당 가격)
-        # =========================
         st.subheader("거래내역 최근 5건")
         trades = recent_trades(df_trade, complex_name, sel_pyeong, df_ref_share=df_view)
         if trades.empty:
             st.info("일치하는 거래내역이 없습니다.")
         else:
-            st_html_table(
-                trades.reset_index(drop=True),
-                default_max=12,
-                col_widths={
-                    "날짜": "14%",
-                    "단지": "22%",
-                    "평형": "10%",
-                    "가격(억)": "12%",
-                    "지분당 가격": "14%",
-                    "구역": "8%",
-                    "동": "8%",
-                    "층": "12%",
-                },
-            )
+            st_html_table(trades.reset_index(drop=True), default_max=12)
 
         st.divider()
 
-        # =========================
-        # (3) 선택 구역 요약
-        # =========================
         st.subheader("선택 구역 평형별 시세")
         if not area_value:
             st.info("선택한 마커의 구역 정보가 없습니다.")
@@ -1232,7 +1093,7 @@ else:
 st.divider()
 
 # =========================
-# (맨 아래로 이동) 지분당 가성비 - 전체지역/전체평형
+# (맨 아래) 지분당 가성비 - 전체지역/전체평형
 # =========================
 st.subheader("지분당 가성비 - 전체지역/전체평형")
 
@@ -1252,16 +1113,5 @@ else:
         df_top[top_cols].reset_index(drop=True),
         default_max=10,
         max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8},
-        col_widths={
-            "구역": "8%",
-            "단지명": "20%",
-            "평형": "10%",
-            "대지지분": "12%",
-            "동": "8%",
-            "층": "8%",
-            "가격(억)": "12%",
-            "평당 가격": "10%",
-            "지분당 가격": "12%",
-        },
         wrapper_class="tbl-wrap-15",
     )
