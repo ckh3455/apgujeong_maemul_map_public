@@ -9,9 +9,11 @@ from google.oauth2.service_account import Credentials
 
 
 LISTING_TAB = "매매물건 목록"
+LOCATION_TAB = "압구정 위치정보"
 TRADE_TAB = "거래내역"
 
 LISTING_COLUMNS = ["상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격"]
+LOCATION_COLUMNS = ["구역", "단지명", "동"]
 TRADE_COLUMNS = [
     "구역", "단지", "단지명", "단지명(단지)", "평형", "평형대", "전용면적",
     "날짜", "거래일", "계약일", "일자", "거래일자", "계약년월", "계약일자",
@@ -88,6 +90,7 @@ def load_data():
     client = gspread.authorize(credentials)
     listing_book = client.open_by_key(_sheet_id(listing_sheet))
     listings = _read_tab(listing_book, _secret("LISTING_TAB", LISTING_TAB), LISTING_COLUMNS)
+    locations = _read_tab(listing_book, _secret("LOCATION_TAB", LOCATION_TAB), LOCATION_COLUMNS)
 
     trade_sheet = _secret("TRADE_SPREADSHEET_ID", listing_sheet)
     trade_tab = _secret("TRADE_TAB", TRADE_TAB)
@@ -97,5 +100,5 @@ def load_data():
     except Exception:
         trades = pd.DataFrame()
 
-    source = f"{_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
-    return listings, trades, source
+    source = f"{_secret('LOCATION_TAB', LOCATION_TAB)} / {_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
+    return listings, locations, trades, source
