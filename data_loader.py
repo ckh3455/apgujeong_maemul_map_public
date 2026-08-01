@@ -9,8 +9,7 @@ from google.oauth2.service_account import Credentials
 
 
 LISTING_TAB = "매매물건 목록"
-TRADE_SPREADSHEET_ID = "1BUye1aPLzIW1QPqCBg5V0cBsi_DGQJMjyevwfawXLz8"
-TRADE_TAB = "압구정동 거래데이터"
+TRADE_TAB = "거래내역"
 UNIT_MASTER_SPREADSHEET_ID = "1QGSM-mICX9KYa5Izym6sFKVaWwO-o0j86V-KmJ-w0IM"
 UNIT_MASTER_TAB = "공동주택 공시가격"
 
@@ -97,10 +96,10 @@ def load_data():
     unit_book = client.open_by_key(_sheet_id(unit_sheet))
     units = _read_tab(unit_book, unit_tab, UNIT_COLUMNS)
 
-    trade_sheet = _secret("TRADE_SPREADSHEET_ID", TRADE_SPREADSHEET_ID)
-    trade_tab = _secret("TRADE_TAB", TRADE_TAB)
-    trade_book = client.open_by_key(_sheet_id(trade_sheet))
-    trades = _read_tab(trade_book, trade_tab, TRADE_COLUMNS)
+    # 가격 판단은 매물 원본 파일 안에서 중개사가 정리한 `거래내역`만 사용한다.
+    # 외부 `압구정동 거래데이터`와 TRADE_SPREADSHEET_ID 설정은 가격 계산에 사용하지 않는다.
+    trade_tab = TRADE_TAB
+    trades = _read_tab(listing_book, trade_tab, TRADE_COLUMNS)
 
     source = f"{unit_tab} / {_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
     return listings, units, trades, source
