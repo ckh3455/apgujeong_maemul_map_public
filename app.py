@@ -1,1144 +1,193 @@
-import os
-import json
-import re
-
 import pandas as pd
 import streamlit as st
 
-import folium
-from streamlit_folium import st_folium
-try:
-    # 일부 환경에서 st_folium 컴포넌트 로딩 실패 시 정적 렌더 fallback 용
-    from streamlit_folium import folium_static
-except Exception:
-    folium_static = None
-
-import gspread
-from google.oauth2.service_account import Credentials
-
-
-# =========================
-# 공개용 컬럼 Allowlist (대외비 컬럼 제외)
-#  - 요약내용: 대외비이므로 로드/표시 모두 제외
-# =========================
-LISTING_ALLOW_COLUMNS = [
-    "상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격",
-    "위도", "경도",
-    # 필요 시 노출(민감하면 제거): "부동산",
-]
-
-LOC_ALLOW_COLUMNS = ["단지명", "동", "위도", "경도", "구역"]
-TRADE_ALLOW_COLUMNS = [
-    "구역", "단지", "단지명", "단지명(단지)", "평형", "평형대",
-    "날짜", "거래일", "계약일", "일자", "거래일자",
-    "가격", "거래가격", "거래가", "실거래가", "금액", "거래금액",
-    "동", "호", "비고"
-]
-
-# =========================
-# Google Sheets 설정
-# =========================
-TAB_LISTING = "매매물건 목록"
-TAB_LOC = "압구정 위치정보"
-TAB_TRADE = "거래내역"
-
-
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).replace("\n", "").strip() for c in df.columns]
-    return df
-
-
-def keep_allow_columns(df: pd.DataFrame, allow: list[str]) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    cols = [c for c in allow if c in df.columns]
-    return df[cols].copy()
-
-
-def dong_key(x) -> str:
-    if pd.isna(x):
-        return ""
-    s = str(x)
-    m = re.findall(r"\d+", s)
-    return m[0].lstrip("0") if m else s.strip()
-
-
-def norm_area(x) -> str:
-    """'1', '1구역', '01구역' => '1' 로 통일"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    m = re.findall(r"\d+", s)
-    if not m:
-        return s
-    return m[0].lstrip("0") or "0"
-
-
-def norm_text(x: str) -> str:
-    """단지명 비교용 정규화"""
-    if x is None:
-        return ""
-    s = str(x).strip().lower()
-    s = s.replace("아파트", "").replace("apt", "").replace("apartment", "")
-    s = re.sub(r"\s+", "", s)
-    s = re.sub(r"[(){}\[\]\-_/·.,]", "", s)
-    return s
-
-
-def norm_size(x: str) -> str:
-    """평형 비교용 정규화"""
-    if x is None:
-        return ""
-    s = str(x).strip().lower()
-    s = s.replace("㎡", "").replace("m2", "").replace("m²", "").replace("평", "")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-def parse_pyeong_num(x) -> float | None:
-    """'35평', '35', '35.5평' -> 35.5"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-    s = str(x).strip()
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
-def pyeong_bucket_10(pyeong: float | None) -> int | None:
-    """35.5 -> 30 (30평대). NaN 안전 처리."""
-    if pyeong is None or pd.isna(pyeong):
-        return None
-    return int(float(pyeong) // 10) * 10
-
-
-def to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return None
-
-
-def fmt_decimal(x, nd=2) -> str:
-    """59.500000 -> 59.5 / 62.100000 -> 62.1"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    num = pd.to_numeric(x, errors="coerce")
-    if pd.isna(num):
-        return str(x)
-    return f"{num:.{nd}f}".rstrip("0").rstrip(".")
-
-
-def compact_strings(df: "pd.DataFrame", max_len_by_col: dict | None = None, default_max: int = 10) -> "pd.DataFrame":
-    """문자열 컬럼 축약(…): 모바일 폭 최적화"""
-    if df is None or getattr(df, "empty", False):
-        return df
-    max_len_by_col = max_len_by_col or {}
-    out = df.copy()
-    for col in out.columns:
-        if pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col]):
-            max_len = int(max_len_by_col.get(col, default_max))
-            ser = out[col].fillna("").astype(str)
-            ser = ser.str.replace(r"\s+", " ", regex=True).str.strip()
-
-            def _cut(x: str) -> str:
-                if not x:
-                    return ""
-                if len(x) <= max_len:
-                    return x
-                if max_len <= 1:
-                    return "…"
-                return x[: max_len - 1] + "…"
-
-            out[col] = ser.map(_cut)
-    return out
-
-
-def st_html_table(
-    df: "pd.DataFrame",
-    max_len_by_col: dict | None = None,
-    default_max: int = 12,
-    max_rows: int | None = None,
-    col_widths: dict | None = None,
-    wrapper_class: str = "tbl-wrap",
-):
-    """Streamlit 표를 HTML로 렌더링 (가운데 정렬 + 스크롤 컨테이너)."""
-    if df is None or getattr(df, "empty", False):
-        st.info("표로 표시할 데이터가 없습니다.")
-        return
-
-    disp = compact_strings(df.copy(), max_len_by_col=max_len_by_col, default_max=default_max)
-    if max_rows is not None:
-        disp = disp.head(int(max_rows))
-
-    html = disp.to_html(index=False, escape=True)
-
-    if col_widths:
-        cols = list(disp.columns)
-        col_tags = []
-        for c in cols:
-            w = col_widths.get(c, None)
-            if w:
-                col_tags.append(f'<col style="width:{w};">')
-            else:
-                col_tags.append("<col>")
-        colgroup = "<colgroup>" + "".join(col_tags) + "</colgroup>"
-        html = re.sub(r"(<table[^>]*>)", r"\1" + colgroup, html, count=1)
-
-    st.markdown(f'<div class="{wrapper_class}">{html}</div>', unsafe_allow_html=True)
-
-
-# =========================
-# 숫자/가격(억)/지분당/평당 가격 계산 유틸
-# =========================
-def parse_numeric_any(x) -> float | None:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return None
-    s = s.replace(",", "")
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
-def price_to_eok_num(x) -> float | None:
-    v = parse_numeric_any(x)
-    if v is None:
-        return None
-    if v >= 1e8:
-        return v / 1e8
-    return v
-
-
-def fmt_eok(x) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    return fmt_decimal(x, nd=2)
-
-
-def make_circle_label_html(label: str, bg_color: str) -> str:
-    size = 30
-    return f"""
-    <div style="
-        background:{bg_color};
-        width:{size}px;height:{size}px;
-        border-radius:50%;
-        border:2px solid rgba(0,0,0,0.45);
-        display:flex;align-items:center;justify-content:center;
-        font-weight:700;font-size:14px;
-        color:#ffffff;
-        box-shadow:0 1px 4px rgba(0,0,0,0.35);
-        ">
-        {label}
-    </div>
-    """
-
-
-def pick_first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
-
-
-# =========================
-# 날짜 파싱(거래내역) 강화: 누락/정렬 오류 방지
-# =========================
-def _yy_to_year(yy: int) -> int:
-    # 2자리 연도 pivot: 70~99 => 1900대, 0~69 => 2000대
-    return 1900 + yy if yy >= 70 else 2000 + yy
-
-
-def parse_trade_date_one(x) -> pd.Timestamp:
-    """
-    '25.09.30', '2025.09.30', '25/9/30', '2025-9-30', '20250930' 등 최대한 흡수.
-    실패 시 NaT.
-    """
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return pd.NaT
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return pd.NaT
-
-    # 숫자만 8자리: YYYYMMDD
-    digits = re.sub(r"\D", "", s)
-    if len(digits) == 8:
-        try:
-            return pd.Timestamp(f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}")
-        except Exception:
-            pass
-
-    # 분리자 통일
-    s2 = re.sub(r"\s+", "", s)
-    s2 = re.sub(r"[./]", "-", s2)
-
-    # yyyy-m-d or yy-m-d
-    m = re.match(r"^(\d{2,4})-(\d{1,2})-(\d{1,2})$", s2)
-    if m:
-        y = int(m.group(1))
-        mo = int(m.group(2))
-        d = int(m.group(3))
-        if y < 100:
-            y = _yy_to_year(y)
-        try:
-            return pd.Timestamp(year=y, month=mo, day=d)
-        except Exception:
-            return pd.NaT
-
-    # 마지막 fallback: pandas 파서
-    try:
-        dt = pd.to_datetime(s2, errors="coerce", infer_datetime_format=True)
-        return dt
-    except Exception:
-        return pd.NaT
-
-
-def parse_trade_date_series(ser: pd.Series) -> pd.Series:
-    return ser.map(parse_trade_date_one)
-
-
-def extract_floor_from_level(x) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    m = re.search(r"(\d+)", s)
-    return m.group(1) if m else s
-
-
-def extract_floor_from_ho(x) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return ""
-
-    if "층" in s:
-        m = re.search(r"(\d+)\s*층", s)
-        if m:
-            return f"{int(m.group(1))}층"
-        m2 = re.search(r"(\d+)", s)
-        return f"{int(m2.group(1))}층" if m2 else s
-
-    if "/" in s or "-" in s:
-        m = re.search(r"(\d+)", s)
-        if m:
-            return f"{int(m.group(1))}층"
-        return ""
-
-    digits = re.sub(r"\D", "", s)
-    if not digits:
-        return ""
-    if len(digits) >= 3:
-        floor_digits = digits[:-2]
-        try:
-            return f"{int(floor_digits)}층"
-        except Exception:
-            return ""
-    try:
-        return f"{int(digits)}층"
-    except Exception:
-        return ""
-
-
-def summarize_listings_table(df: pd.DataFrame, group_cols: list[str], top_n: int = 60) -> pd.DataFrame:
-    """
-    group_cols 기준으로 매물건수/최저/최고(억) 요약 테이블 생성
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    price_col = "가격_eok_num" if "가격_eok_num" in df.columns else ("가격_num" if "가격_num" in df.columns else None)
-    if not price_col:
-        return pd.DataFrame()
-
-    g = (
-        df.groupby(group_cols, dropna=False)
-        .agg(
-            매물건수=(price_col, "size"),
-            최저가격=(price_col, "min"),
-            최고가격=(price_col, "max"),
-        )
-        .reset_index()
-    )
-
-    g["가격대(최저~최고)"] = g["최저가격"].map(fmt_eok) + "억 ~ " + g["최고가격"].map(fmt_eok) + "억"
-    g = g.sort_values(["최저가격", "매물건수"], ascending=[True, False]).reset_index(drop=True)
-
-    if top_n is not None and len(g) > int(top_n):
-        g = g.head(int(top_n)).copy()
-
-    cols = [c for c in group_cols if c in g.columns] + ["매물건수", "가격대(최저~최고)"]
-    return g[cols]
-
-
-# =========================
-# Google Sheets helpers
-# =========================
-def extract_spreadsheet_id(url_or_id: str) -> str:
-    if not url_or_id:
-        return ""
-    s = str(url_or_id).strip()
-    if "docs.google.com" not in s and "/" not in s and len(s) >= 20:
-        return s
-    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", s)
-    if m:
-        return m.group(1)
-    s = s.split("#", 1)[0]
-    return s
-
-
-def get_spreadsheet_id() -> str:
-    if "SPREADSHEET_ID" in st.secrets:
-        return extract_spreadsheet_id(st.secrets["SPREADSHEET_ID"])
-
-    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-        gs = st.secrets["connections"]["gsheets"]
-        if "spreadsheet" in gs:
-            sid = extract_spreadsheet_id(gs["spreadsheet"])
-            if sid:
-                return sid
-
-    env = os.getenv("SPREADSHEET_ID")
-    if env:
-        return extract_spreadsheet_id(env)
-
-    raise RuntimeError("SPREADSHEET_ID가 설정되지 않았습니다. Secrets 또는 환경변수를 설정하세요.")
-
-
-def _repair_private_key_multiline_json(raw: str) -> str:
-    s = raw.strip()
-    m = re.search(r'"private_key"\s*:\s*"', s)
-    if not m:
-        return s
-
-    start = m.end()
-    end_match = re.search(r'"\s*,\s*"\s*client_email"\s*:', s[start:])
-    if not end_match:
-        end_match = re.search(r'"\s*,\s*"[a-zA-Z0-9_]+"\\s*:', s[start:])
-        if not end_match:
-            return s
-
-    end = start + end_match.start()
-    pk = s[start:end]
-    pk2 = pk.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
-    return s[:start] + pk2 + s[end:]
-
-
-def parse_service_account_json(value: str) -> dict:
-    raw = str(value).strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        repaired = _repair_private_key_multiline_json(raw)
-        return json.loads(repaired)
-
-
-def get_service_account_info():
-    if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
-        v = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
-        if isinstance(v, dict):
-            return v
-        return parse_service_account_json(v)
-
-    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-        gs = st.secrets["connections"]["gsheets"]
-        keys = [
-            "type", "project_id", "private_key_id", "private_key",
-            "client_email", "client_id",
-            "auth_uri", "token_uri",
-            "auth_provider_x509_cert_url", "client_x509_cert_url",
-        ]
-        sa = {k: gs[k] for k in keys if k in gs}
-        required = ["type", "project_id", "private_key", "client_email", "token_uri"]
-        if all(k in sa and str(sa[k]).strip() for k in required):
-            return sa
-        raise RuntimeError(
-            "Streamlit Secrets의 [connections.gsheets]에 서비스계정 필수 항목이 부족합니다. "
-            "type/project_id/private_key/client_email/token_uri를 확인하세요."
-        )
-
-    env = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
-    if env:
-        return parse_service_account_json(env)
-
-    raise RuntimeError(
-        "서비스계정이 설정되지 않았습니다. "
-        "Streamlit Secrets에 GCP_SERVICE_ACCOUNT_JSON 또는 [connections.gsheets]를 등록하세요."
-    )
-
-
-@st.cache_data(ttl=600)
-def load_data():
-    sa = get_service_account_info()
-    spreadsheet_id = get_spreadsheet_id()
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds = Credentials.from_service_account_info(sa, scopes=scopes)
-    gc = gspread.authorize(creds)
-
-    sh = gc.open_by_key(spreadsheet_id)
-
-    ws_list = sh.worksheet(TAB_LISTING)
-    ws_loc = sh.worksheet(TAB_LOC)
-
-    df_list = pd.DataFrame(ws_list.get_all_records())
-    df_loc = pd.DataFrame(ws_loc.get_all_records())
-
-    try:
-        ws_trade = sh.worksheet(TAB_TRADE)
-        df_trade = pd.DataFrame(ws_trade.get_all_records())
-    except Exception:
-        df_trade = pd.DataFrame()
-
-    df_list = clean_columns(df_list)
-    df_loc = clean_columns(df_loc)
-    df_trade = clean_columns(df_trade)
-
-    # 대외비 컬럼(요약내용)은 allowlist에 없으므로 로드/표시되지 않음
-    df_list = keep_allow_columns(df_list, LISTING_ALLOW_COLUMNS)
-    df_loc = keep_allow_columns(df_loc, LOC_ALLOW_COLUMNS)
-    df_trade = keep_allow_columns(df_trade, TRADE_ALLOW_COLUMNS)
-
-    return df_list, df_loc, df_trade, sa.get("client_email", "")
-
-
-def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
-    if clicked_lat is None or clicked_lng is None:
-        return None
-    clat = float(clicked_lat)
-    clng = float(clicked_lng)
-
-    best_meta = None
-    best_d = None
-    for lat, lng, meta in marker_rows:
-        d = (float(lat) - clat) ** 2 + (float(lng) - clng) ** 2
-        if best_d is None or d < best_d:
-            best_d = d
-            best_meta = meta
-    return best_meta
-
-
-def recent_trades(df_trade: pd.DataFrame, complex_name: str, pyeong_value: str, df_ref_share: pd.DataFrame | None = None) -> pd.DataFrame:
-    """
-    - 단지명 + 평형(또는 평형대)만 일치하는 거래내역 최신 5건
-    - 최신 날짜가 위(내림차순)로 보장
-    - 날짜 파싱 강화로 누락 최소화
-    """
-    if df_trade is None or df_trade.empty:
-        return pd.DataFrame()
-
-    col_complex = pick_first_existing_column(df_trade, ["단지", "단지명", "단지명(단지)"])
-    col_size = pick_first_existing_column(df_trade, ["평형", "평형대"])
-    col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
-    if not (col_complex and col_size and col_date):
-        return pd.DataFrame()
-
-    t = df_trade.copy()
-    t["_complex_norm"] = t[col_complex].astype(str).map(norm_text)
-    t["_size_norm"] = t[col_size].astype(str).map(norm_size)
-
-    complex_norm = norm_text(complex_name)
-    size_norm = norm_size(pyeong_value)
-
-    t = t[(t["_complex_norm"] == complex_norm) & (t["_size_norm"] == size_norm)].copy()
-    if t.empty:
-        return pd.DataFrame()
-
-    # 날짜 파싱 강화
-    t["_dt"] = parse_trade_date_series(t[col_date])
-
-    # 최신이 위로 오도록 정렬 후 5건
-    # (NaT는 가장 아래로 보내기)
-    t = t.sort_values(["_dt"], ascending=[False], na_position="last").head(5).copy()
-
-    price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
-    if price_col:
-        t["_price_eok"] = t[price_col].map(price_to_eok_num)
-        t["가격(억)"] = t["_price_eok"].map(fmt_eok)
-    else:
-        t["_price_eok"] = None
-        t["가격(억)"] = ""
-
-    if "호" in t.columns:
-        t["층"] = t["호"].map(extract_floor_from_ho)
-    elif "층" in t.columns:
-        t["층"] = t["층"].map(extract_floor_from_level).map(lambda v: f"{v}층" if str(v).strip() else "")
-    else:
-        t["층"] = ""
-
-    # 지분당 가격(매물 목록에서 지분 매핑)
-    t["_share_num"] = None
-    if df_ref_share is not None and not df_ref_share.empty:
-        ref = df_ref_share.copy()
-        if "단지명" in ref.columns and "평형" in ref.columns and "대지지분_num" in ref.columns:
-            ref["_complex_norm"] = ref["단지명"].astype(str).map(norm_text)
-            ref["_size_norm"] = ref["평형"].astype(str).map(norm_size)
-
-            share_map = (
-                ref.dropna(subset=["대지지분_num"])
-                .groupby(["_complex_norm", "_size_norm"], dropna=False)["대지지분_num"]
-                .median()
-                .to_dict()
-            )
-            t["_share_num"] = t.apply(lambda r: share_map.get((r["_complex_norm"], r["_size_norm"])), axis=1)
-
-    t["_ppshare"] = t.apply(
-        lambda r: (r["_price_eok"] / r["_share_num"])
-        if (pd.notna(r.get("_price_eok")) and pd.notna(r.get("_share_num")) and float(r["_share_num"]) != 0)
-        else None,
-        axis=1,
-    )
-    t["지분당 가격"] = t["_ppshare"].map(fmt_eok)
-
-    out = pd.DataFrame()
-    out["날짜"] = t[col_date].astype(str)
-    out["단지"] = t[col_complex].astype(str)
-    out["평형"] = t[col_size].astype(str)
-    out["가격(억)"] = t["가격(억)"].astype(str)
-    out["지분당 가격"] = t["지분당 가격"].astype(str)
-
-    out["구역"] = t["구역"].astype(str) if "구역" in t.columns else ""
-    out["동"] = t["동"].astype(str) if "동" in t.columns else ""
-    out["층"] = t["층"].astype(str)
-
-    # out에서도 최신순 보장(파싱 결과 기반)
-    out["_dt"] = t["_dt"].values
-    out = out.sort_values("_dt", ascending=False, na_position="last").drop(columns=["_dt"]).reset_index(drop=True)
-
-    return out[["날짜", "단지", "평형", "가격(억)", "지분당 가격", "구역", "동", "층"]]
-
-
-# =================== UI ===================
-st.set_page_config(layout="wide")
-
-# ===== 상단: 타이틀(좌) + 업소홍보(우) =====
-col_title, col_promo = st.columns([3.3, 1.7])
-
-with col_title:
-    st.markdown('<div class="app-title"><h1>압구정동 시세 지도</h1></div>', unsafe_allow_html=True)
-
-with col_promo:
-    st.markdown(
-        """
-        <div class="promo-card">
-            <div class="promo-name">☎ 압구정 원 부동산</div>
-            <div class="promo-desc">압구정 재건축 전문 컨설팅 · 확실한 순위 판단</div>
-            <div class="promo-label">문의</div>
-            <div class="promo-contact">02-540-3334 / 최이사 Mobile 010-3065-1780</div>
-            <div class="promo-sub">압구정 미래가치 예측.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+from data_loader import load_data
+from prediction import (
+    build_prediction,
+    floor_from_ho,
+    normalize_area,
+    parse_number,
+    prepare_listings,
+    prepare_trades,
+)
+
+
+st.set_page_config(page_title="압구정 매도 예측", page_icon="🏢", layout="wide")
 
 st.markdown(
     """
-<style>
-/* ===== Header title & Promo card ===== */
-.app-title h1{margin:0;padding:0;font-size:56px;font-weight:800;letter-spacing:-0.5px;color:#2b2f36;}
-.promo-card{border:1px solid rgba(0,0,0,0.10);border-radius:14px;padding:14px 16px;background:#ffffff;box-shadow:0 2px 10px rgba(0,0,0,0.06);}
-.promo-name{font-size:18px;font-weight:800;margin:0 0 6px 0;}
-.promo-desc{font-size:14px;font-weight:600;color:#2b2f36;margin:0 0 10px 0;}
-.promo-label{font-size:13px;font-weight:800;margin:0 0 2px 0;}
-.promo-contact{font-size:13px;font-weight:600;color:#2b2f36;margin:0;line-height:1.4;}
-.promo-sub{font-size:12px;color:rgba(0,0,0,0.55);margin:8px 0 0 0;}
-
-/* ===== 지도 높이 (20% 증가) ===== */
-div[data-testid="stIFrame"], div[data-testid="stIFrame"] iframe {height:550px !important;width:100% !important;}
-@media (max-width:768px){div[data-testid="stIFrame"], div[data-testid="stIFrame"] iframe {height:360px !important;}}
-
-/* ===== 표 래퍼 ===== */
-.tbl-wrap{width:100%;max-height:520px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}
-@media (max-width:768px){.tbl-wrap{max-height:360px;}}
-.tbl-wrap-15{width:100%;max-height:460px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}
-@media (max-width:768px){.tbl-wrap-15{max-height:320px;}}
-.tbl-wrap table, .tbl-wrap-15 table{width:100% !important;table-layout:fixed !important;border-collapse:collapse;}
-.tbl-wrap th, .tbl-wrap td, .tbl-wrap-15 th, .tbl-wrap-15 td{
-    text-align:center !important;vertical-align:middle !important;border:1px solid rgba(0,0,0,0.10);
-    padding:5px 3px;font-size:12px;line-height:1.25;max-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word;
-}
-.tbl-wrap th, .tbl-wrap-15 th{background:rgba(0,0,0,0.03);font-weight:800;}
-@media (max-width:768px){.tbl-wrap th, .tbl-wrap td, .tbl-wrap-15 th, .tbl-wrap-15 td{padding:3px 2px;font-size:10.5px;}}
-
-/* ===== 상단 필터 버튼 (모바일 줄밀림 방지) ===== */
-div[data-testid="stButton"] > button{
-    padding:0.35rem 0.25rem !important;font-size:0.82rem !important;font-weight:800 !important;white-space:nowrap !important;
-}
-@media (max-width:768px){
-    div[data-testid="stButton"] > button{padding:0.28rem 0.18rem !important;font-size:0.74rem !important;}
-}
-</style>
+    <style>
+    .block-container {max-width: 1180px; padding-top: 1.6rem;}
+    .hero {padding:1.25rem 1.4rem;border-radius:18px;background:linear-gradient(135deg,#14213d,#1f4e79);color:white;margin-bottom:1rem;}
+    .hero h1 {margin:0 0 .35rem 0;font-size:2rem;}
+    .hero p {margin:0;color:#e8eef7;}
+    .result-card {border:1px solid #dce3ea;border-radius:14px;padding:1rem;background:#fff;min-height:132px;}
+    .result-label {font-size:.88rem;color:#667085;}
+    .result-value {font-size:1.55rem;font-weight:750;color:#14213d;margin:.2rem 0;}
+    .result-note {font-size:.84rem;color:#667085;}
+    div[data-testid="stMetric"] {border:1px solid #dce3ea;border-radius:14px;padding:12px 14px;background:white;}
+    </style>
     """,
     unsafe_allow_html=True,
 )
 
-only_active = True
-
-if st.button("데이터 새로고침"):
-    load_data.clear()
-    st.rerun()
-
-# ====== Load ======
-df_list, df_loc, df_trade, _client_email = load_data()
-
-need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층수", "가격", "상태"]
-missing = [c for c in need_cols if c not in df_list.columns]
-if missing:
-    st.error(f"'매매물건 목록' 탭에서 다음 컬럼이 필요합니다: {missing}")
-    st.stop()
-
-for c in ["위도", "경도"]:
-    if c not in df_list.columns:
-        df_list[c] = None
-
-df_list["동_key"] = df_list["동"].apply(dong_key)
-df_list["층"] = df_list["층수"].apply(extract_floor_from_level)
-
-df_loc = df_loc.copy()
-if "동" in df_loc.columns:
-    df_loc["동_key"] = df_loc["동"].apply(dong_key)
-
-df_view = df_list.copy()
-if only_active:
-    df_view = df_view[df_view["상태"].astype(str).str.strip() == "활성"].copy()
-
-if df_view.empty:
-    st.warning("현재 표시할 매물이 없습니다.")
-    st.stop()
-
-df_view["위도"] = df_view["위도"].apply(to_float)
-df_view["경도"] = df_view["경도"].apply(to_float)
-
-if all(c in df_loc.columns for c in ["단지명", "동_key", "위도", "경도"]):
-    df_loc = df_loc.copy()
-    df_loc["위도"] = df_loc["위도"].apply(to_float)
-    df_loc["경도"] = df_loc["경도"].apply(to_float)
-
-    df_view = df_view.merge(
-        df_loc[["단지명", "동_key", "위도", "경도"]].rename(columns={"위도": "위도_loc", "경도": "경도_loc"}),
-        on=["단지명", "동_key"],
-        how="left",
-    )
-    df_view["위도"] = df_view["위도"].fillna(df_view["위도_loc"])
-    df_view["경도"] = df_view["경도"].fillna(df_view["경도_loc"])
-    df_view.drop(columns=["위도_loc", "경도_loc"], inplace=True)
-
-# =========================
-# 가격/평형대/대지지분/평당/지분당 가격 정규화 컬럼
-# =========================
-df_view["가격_eok_num"] = df_view["가격"].map(price_to_eok_num)
-df_view["가격_num"] = df_view["가격_eok_num"]
-
-df_view["평형대_num"] = df_view["평형대"].map(parse_pyeong_num)
-df_view["평형대_bucket"] = df_view["평형대_num"].apply(pyeong_bucket_10)
-
-df_view["평형_num"] = df_view["평형"].map(parse_pyeong_num)
-df_view["평_num_for_ppy"] = df_view["평형_num"].fillna(df_view["평형대_num"])
-
-df_view["대지지분_num"] = df_view["대지지분"].map(parse_numeric_any)
-
-df_view["지분당가격_num"] = df_view.apply(
-    lambda r: (r["가격_eok_num"] / r["대지지분_num"])
-    if (pd.notna(r.get("가격_eok_num")) and pd.notna(r.get("대지지분_num")) and float(r["대지지분_num"]) != 0)
-    else None,
-    axis=1,
+st.markdown(
+    """
+    <div class="hero">
+      <h1>압구정 매도 가능가격·기간 예측</h1>
+      <p>구역·동·호수를 입력하면 층을 판정하고, 실거래와 현재 경쟁 매물을 이용해 매도 시나리오를 계산합니다.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-df_view["평당가격_num"] = df_view.apply(
-    lambda r: (r["가격_eok_num"] / r["평_num_for_ppy"])
-    if (pd.notna(r.get("가격_eok_num")) and pd.notna(r.get("평_num_for_ppy")) and float(r["평_num_for_ppy"]) != 0)
-    else None,
-    axis=1,
-)
-
-df_view["가격(억)"] = df_view["가격_eok_num"].map(fmt_eok)
-df_view["지분당 가격"] = df_view["지분당가격_num"].map(fmt_eok)
-df_view["평당 가격"] = df_view["평당가격_num"].map(fmt_eok)
-
-# 지도/마커용 데이터프레임(좌표가 있는 매물만)
-df_map = df_view.dropna(subset=["위도", "경도"]).copy()
-
-gdf = (
-    df_map.groupby(["단지명", "동_key"], dropna=False)
-    .agg(
-        구역=("구역", "first"),
-        위도=("위도", "first"),
-        경도=("경도", "first"),
-        활성건수=("동_key", "size"),
-    )
-    .reset_index()
-)
-
-palette = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-]
-areas = sorted([a for a in gdf["구역"].dropna().astype(str).unique()])
-area_color = {a: palette[i % len(palette)] for i, a in enumerate(areas)}
-default_color = "#333333"
-DEFAULT_ZOOM = 16
-
-if "map_center" not in st.session_state:
-    try:
-        lat0 = float(pd.to_numeric(gdf["위도"], errors="coerce").mean())
-        lng0 = float(pd.to_numeric(gdf["경도"], errors="coerce").mean())
-        if pd.isna(lat0) or pd.isna(lng0):
-            raise ValueError("NaN center")
-        st.session_state["map_center"] = [lat0, lng0]
-    except Exception:
-        st.session_state["map_center"] = [37.5275, 127.0300]
-if "map_zoom" not in st.session_state:
-    st.session_state["map_zoom"] = DEFAULT_ZOOM
-if "selected_meta" not in st.session_state:
-    st.session_state["selected_meta"] = None
-if "last_click_sig" not in st.session_state:
-    st.session_state["last_click_sig"] = ""
-
-# ====== 지도 생성 ======
-m = folium.Map(
-    location=st.session_state["map_center"],
-    zoom_start=int(st.session_state["map_zoom"]),
-    tiles="CartoDB positron",
-)
-
-marker_rows = []
-for _, r in gdf.iterrows():
-    marker_rows.append(
-        (
-            r["위도"],
-            r["경도"],
-            {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]},
-        )
+with st.expander("계산 기준과 제한사항", expanded=False):
+    st.markdown(
+        """
+        - 실거래는 **계약일** 기준으로 계산합니다.
+        - 최근 약 1개월은 토지거래허가 및 신고 지연으로 거래자료가 불완전할 수 있어 거래속도 계산에서 보수적으로 다룹니다.
+        - 가격은 **거래시점과 층만 보정**합니다. 동 위치와 한강 조망 프리미엄은 현재 반영하지 않습니다.
+        - 표본이 부족하면 단일 가격을 단정하지 않고 범위와 낮은 신뢰도로 표시합니다.
+        """
     )
 
-for _, r in gdf.iterrows():
-    area_raw = str(r["구역"]) if pd.notna(r["구역"]) else ""
-    bg = area_color.get(area_raw, default_color)
-    dong_label = str(r["동_key"])
-    area_display = f"{norm_area(area_raw)}구역" if norm_area(area_raw) else ""
-    tooltip = f"{area_display} | {r['단지명']} {dong_label}동 | 활성 {int(r['활성건수'])}건"
-
-    folium.CircleMarker(
-        location=[r["위도"], r["경도"]],
-        radius=18,
-        weight=0,
-        opacity=0,
-        fill=True,
-        fill_opacity=0,
-        tooltip=tooltip,
-    ).add_to(m)
-
-    folium.Marker(
-        location=[r["위도"], r["경도"]],
-        icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)),
-        tooltip=tooltip,
-    ).add_to(m)
-
-st.subheader("지도")
-
-# st_folium 컴포넌트 로딩 실패 시 정적 지도 fallback
-out = {}
 try:
-    out = st_folium(m, height=550, width=None, returned_objects=["last_object_clicked"], key="map")
-except Exception:
-    st.warning("지도 컴포넌트 로딩이 불안정하여 정적 지도로 표시합니다.")
-    if folium_static is not None:
-        folium_static(m, width=None, height=550)
-    else:
-        # 최후 fallback(정적 HTML)
-        st.components.v1.html(m._repr_html_(), height=550, scrolling=False)
-    out = {}
+    raw_listings, raw_trades, source_note = load_data()
+except Exception as exc:
+    st.error("데이터를 불러오지 못했습니다. Streamlit Secrets와 시트 이름을 확인해 주세요.")
+    st.exception(exc)
+    st.stop()
 
-if out:
-    clicked = out.get("last_object_clicked", None)
-    if clicked:
-        lat = clicked.get("lat")
-        lng = clicked.get("lng")
-        if lat is not None and lng is not None:
-            click_sig = f"{round(float(lat), 6)},{round(float(lng), 6)}"
-            if st.session_state["last_click_sig"] != click_sig:
-                meta = resolve_clicked_meta(lat, lng, marker_rows)
-                if meta:
-                    st.session_state["selected_meta"] = meta
-                    st.session_state["map_center"] = [float(meta["위도"]), float(meta["경도"])]
-                    st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
-                    st.session_state["last_click_sig"] = click_sig
-                    st.rerun()
+listings = prepare_listings(raw_listings)
+trades = prepare_trades(raw_trades, listings)
 
-# =========================
-# 상단(맵 아래) 3단 버튼 필터 UI
-# =========================
-st.subheader("필터를 선택하면 해당 데이터가 출력됩니다")
-st.write("매물 시세는 호가입니다.")
+if listings.empty:
+    st.warning("입력에 사용할 매물 자료가 없습니다.")
+    st.stop()
 
-if "top_filter_mode" not in st.session_state:
-    st.session_state["top_filter_mode"] = "area"
-if "top_filter_value" not in st.session_state:
-    st.session_state["top_filter_value"] = "1"
+st.subheader("1. 물건 입력")
+c1, c2, c3 = st.columns(3)
 
-def set_top_filter(mode: str, value: str):
-    st.session_state["top_filter_mode"] = mode
-    st.session_state["top_filter_value"] = value
-    st.rerun()
+area_values = sorted(
+    [x for x in listings["_area"].dropna().astype(str).unique() if x],
+    key=lambda x: int(x) if x.isdigit() else 999,
+)
+with c1:
+    selected_area = st.selectbox("구역", area_values, format_func=lambda x: f"{x}구역")
 
-# 1) 구역
-row = st.columns([1.35, 1, 1, 1, 1, 1, 1], gap="small")
-row[0].markdown("**구역선택**")
-for i, a in enumerate(["1", "2", "3", "4", "5", "6"], start=1):
-    txt = f"{a}구역"
-    is_sel = (st.session_state["top_filter_mode"] == "area" and st.session_state["top_filter_value"] == a)
-    shown = f"✓ {txt}" if is_sel else txt
-    if row[i].button(shown, use_container_width=True, key=f"top_area_{a}"):
-        set_top_filter("area", a)
+area_rows = listings[listings["_area"] == selected_area].copy()
+dong_values = sorted(
+    [x for x in area_rows["_dong"].dropna().astype(str).unique() if x],
+    key=lambda x: int(x) if x.isdigit() else 9999,
+)
+with c2:
+    selected_dong = st.selectbox("동", dong_values, format_func=lambda x: f"{x}동")
+with c3:
+    ho_text = st.text_input("호수", placeholder="예: 1203 또는 1203호")
 
-# 2) 평형대
-row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
-row[0].markdown("**평형대별**")
-size_labels = [
-    ("20", "20평대"),
-    ("30", "30평대"),
-    ("40", "40평대"),
-    ("50", "50평대"),
-    ("60", "60평대"),
-    ("70", "70평대"),
-    ("80+", "80평대이상"),
-]
-for i, (v, txt) in enumerate(size_labels, start=1):
-    is_sel = (st.session_state["top_filter_mode"] == "size" and st.session_state["top_filter_value"] == v)
-    shown = f"✓ {txt}" if is_sel else txt
-    if row[i].button(shown, use_container_width=True, key=f"top_size_{v}"):
-        set_top_filter("size", v)
+unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
+complex_values = sorted(unit_rows["단지명"].dropna().astype(str).unique().tolist()) if "단지명" in unit_rows else []
+complex_name = complex_values[0] if complex_values else ""
 
-# 3) 금액대
-row = st.columns([1.35, 1, 1, 1, 1, 1, 1, 1], gap="small")
-row[0].markdown("**금액대별**")
-price_labels = [
-    ("40", "40억대"),
-    ("50", "50억대"),
-    ("60", "60억대"),
-    ("70", "70억대"),
-    ("80", "80억대"),
-    ("90", "90억대"),
-    ("100+", "100억 이상"),
-]
-for i, (v, txt) in enumerate(price_labels, start=1):
-    is_sel = (st.session_state["top_filter_mode"] == "price" and st.session_state["top_filter_value"] == v)
-    shown = f"✓ {txt}" if is_sel else txt
-    if row[i].button(shown, use_container_width=True, key=f"top_price_{v}"):
-        set_top_filter("price", v)
+floor = floor_from_ho(ho_text)
+total_floor_candidates = unit_rows["_total_floor"].dropna() if "_total_floor" in unit_rows else pd.Series(dtype=float)
+total_floor = int(total_floor_candidates.median()) if not total_floor_candidates.empty else None
 
-st.divider()
+c4, c5, c6 = st.columns(3)
+with c4:
+    st.text_input("자동 확인 단지", value=complex_name, disabled=True)
+with c5:
+    st.text_input("자동 판정 층", value=(f"{floor}층" if floor else "호수를 입력하세요"), disabled=True)
+with c6:
+    st.text_input("확인된 최고층", value=(f"{total_floor}층" if total_floor else "자료 없음"), disabled=True)
 
-# =========================
-# 필터 적용 + 요약 + 결과표 + 거래내역
-# =========================
-mode = st.session_state["top_filter_mode"]
-val = st.session_state["top_filter_value"]
+size_values = sorted(unit_rows["평형"].dropna().astype(str).unique().tolist()) if "평형" in unit_rows else []
+p1, p2 = st.columns([1, 1])
+with p1:
+    selected_size = st.selectbox("평형", size_values) if size_values else st.text_input("평형")
+with p2:
+    asking_price = st.number_input("희망 매도가(억원)", min_value=0.0, max_value=500.0, value=0.0, step=0.1)
 
-df_f = df_view.copy()
-df_f["_area_norm"] = df_f["구역"].astype(str).map(norm_area)
+run = st.button("예측 계산", type="primary", use_container_width=True)
 
-title = ""
-if mode == "area":
-    title = f"{val}구역 내 매물"
-    df_f = df_f[df_f["_area_norm"] == val].copy()
-elif mode == "size":
-    if val == "80+":
-        title = "80평대 이상 매물"
-        df_f = df_f[df_f["평형대_bucket"].fillna(-1) >= 80].copy()
-    else:
-        b = int(val)
-        title = f"{b}평대 매물"
-        df_f = df_f[df_f["평형대_bucket"] == b].copy()
-elif mode == "price":
-    if val == "100+":
-        title = "100억 이상 매물"
-        df_f = df_f[df_f["가격_eok_num"].fillna(-1) >= 100].copy()
-    else:
-        b = int(val)
-        title = f"{b}억대 매물"
-        df_f = df_f[(df_f["가격_eok_num"] >= b) & (df_f["가격_eok_num"] < b + 10)].copy()
+if run:
+    if not ho_text.strip() or floor is None:
+        st.error("호수를 정확히 입력해 주세요. 예: 1203")
+        st.stop()
+    if not selected_size:
+        st.error("평형을 선택해 주세요.")
+        st.stop()
 
-st.subheader(title)
-
-if df_f.empty:
-    st.info("조건에 맞는 매물이 없습니다.")
-else:
-    df_f = df_f.sort_values(["가격_num", "지분당가격_num"], ascending=[True, True]).reset_index(drop=True)
-
-    total_cnt = len(df_f)
-    min_p = df_f["가격_eok_num"].min()
-    max_p = df_f["가격_eok_num"].max()
-
-    if mode == "area":
-        st.markdown(f"**요약:** {val}구역 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
-    elif mode == "size":
-        label = "80평대 이상" if val == "80+" else f"{val}평대"
-        st.markdown(f"**요약:** {label} 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
-    elif mode == "price":
-        label = "100억 이상" if val == "100+" else f"{val}억대"
-        st.markdown(f"**요약:** {label} 매물 **{total_cnt}건**, 최저 **{fmt_eok(min_p)}억** ~ 최고 **{fmt_eok(max_p)}억**")
-
-    group_cols = [c for c in ["구역", "단지명", "평형"] if c in df_f.columns]
-    sum_tbl = summarize_listings_table(df_f, group_cols=group_cols, top_n=60)
-    if not sum_tbl.empty:
-        st.caption("단지/평형별 요약 (매물건수, 최저~최고)")
-        st_html_table(
-            sum_tbl,
-            default_max=14,
-            max_len_by_col={"단지명": 10, "평형": 6},
-            col_widths={
-                "구역": "10%",
-                "단지명": "32%",
-                "평형": "12%",
-                "매물건수": "14%",
-                "가격대(최저~최고)": "32%",
-            },
-            wrapper_class="tbl-wrap",
-        )
-
-    st.divider()
-
-    # 대외비 컬럼(요약내용) 미포함
-    show_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
-    show_cols = [c for c in show_cols if c in df_f.columns]
-
-    st.caption(f"해당 조건 매물: {len(df_f):,}건 (표는 스크롤로 전체 확인)")
-    st_html_table(
-        df_f[show_cols].reset_index(drop=True),
-        max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8},
-        default_max=10,
-        col_widths={
-            "구역": "8%",
-            "단지명": "20%",
-            "평형": "10%",
-            "대지지분": "12%",
-            "동": "8%",
-            "층": "8%",
-            "가격(억)": "12%",
-            "평당 가격": "11%",
-            "지분당 가격": "11%",
-        },
+    result = build_prediction(
+        listings=listings,
+        trades=trades,
+        area=selected_area,
+        complex_name=complex_name,
+        dong=selected_dong,
+        size=selected_size,
+        floor=floor,
+        total_floor=total_floor,
+        asking_price=(asking_price if asking_price > 0 else None),
     )
 
     st.divider()
+    st.subheader("2. 예측 결과")
 
-    st.subheader("거래내역 최근 5건 (해당 항목별 순차 출력)")
-    MAX_KEYS_TO_SHOW = 20
-    key_df = df_f[["단지명", "평형"]].astype(str).drop_duplicates().head(MAX_KEYS_TO_SHOW)
+    if not result["available"]:
+        st.warning(result["message"])
+        st.stop()
 
-    if len(df_f[["단지명", "평형"]].astype(str).drop_duplicates()) > MAX_KEYS_TO_SHOW:
-        st.caption(f"표시 항목이 많아 상위 {MAX_KEYS_TO_SHOW}개(단지/평형)만 거래내역을 출력합니다.")
-
-    for idx, r in key_df.iterrows():
-        cx = r["단지명"]
-        py = r["평형"]
-        with st.expander(f"{cx} / {py} 거래내역", expanded=(idx == 0)):
-            tr = recent_trades(df_trade, cx, py, df_ref_share=df_view)
-            if tr.empty:
-                st.info("일치하는 거래내역이 없습니다.")
-            else:
-                st_html_table(
-                    tr.reset_index(drop=True),
-                    default_max=12,
-                    col_widths={
-                        "날짜": "14%",
-                        "단지": "22%",
-                        "평형": "10%",
-                        "가격(억)": "12%",
-                        "지분당 가격": "14%",
-                        "구역": "8%",
-                        "동": "8%",
-                        "층": "12%",
-                    },
-                )
-
-st.divider()
-
-# =========================
-# (마커 클릭 상세) 마커 클릭 시에만 표시
-#  - 대외비(요약내용) 절대 출력하지 않음
-# =========================
-meta = st.session_state.get("selected_meta", None)
-
-if not meta:
-    st.info("마커를 클릭하면 단지/평형 상세(선택 단지/평형, 해당 단지 거래내역 등)도 볼 수 있습니다. (상단 필터는 클릭 없이 사용 가능)")
-else:
-    complex_name = meta["단지명"]
-
-    st.subheader("선택 단지/평형의 매물시세")
-    df_complex = df_view[df_view["단지명"] == complex_name].copy()
-    pyeong_candidates = sorted(df_complex["평형"].astype(str).str.strip().dropna().unique().tolist())
-
-    if not pyeong_candidates:
-        st.info("선택한 단지에서 평형 정보를 찾을 수 없습니다.")
-    else:
-        sel_key = f"sel_pyeong_{norm_text(complex_name)}"
-        sel_pyeong = st.selectbox("평형 선택", pyeong_candidates, index=0, key=sel_key)
-
-        size_norm = norm_size(sel_pyeong)
-        df_pick = df_complex.copy()
-        df_pick["_size_norm"] = df_pick["평형"].astype(str).map(norm_size)
-        df_pick = df_pick[df_pick["_size_norm"] == size_norm].copy()
-
-        df_pick = df_pick.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True], na_position="last").reset_index(drop=True)
-
-        show_cols = ["단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
-        if "부동산" in df_pick.columns:
-            show_cols.insert(show_cols.index("가격(억)") + 1, "부동산")
-        show_cols = [c for c in show_cols if c in df_pick.columns]
-
-        st_html_table(
-            df_pick[show_cols].reset_index(drop=True),
-            max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8, "부동산": 8},
-            default_max=10,
+    cards = st.columns(3)
+    values = [
+        ("빠른 매도", result["quick_price"], result["quick_days"]),
+        ("적정 매도", result["fair_price"], result["fair_days"]),
+        ("목표 매도", result["target_price"], result["target_days"]),
+    ]
+    for col, (label, price, days) in zip(cards, values):
+        col.markdown(
+            f"<div class='result-card'><div class='result-label'>{label}</div>"
+            f"<div class='result-value'>{price[0]:.1f}~{price[1]:.1f}억원</div>"
+            f"<div class='result-note'>예상 계약기간 {days}</div></div>",
+            unsafe_allow_html=True,
         )
 
-        st.divider()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("층 보정 중심가격", f"{result['center_price']:.1f}억원")
+    m2.metric("최근 월평균 거래", f"{result['monthly_sales']:.1f}건")
+    m3.metric("현재 경쟁 매물", f"{result['inventory']}건")
+    m4.metric("신뢰도", result["confidence"])
 
-        st.subheader("거래내역 최근 5건")
-        trades = recent_trades(df_trade, complex_name, sel_pyeong, df_ref_share=df_view)
-        if trades.empty:
-            st.info("일치하는 거래내역이 없습니다.")
-        else:
-            st_html_table(trades.reset_index(drop=True), default_max=12)
+    if asking_price > 0:
+        gap = result["asking_gap_pct"]
+        direction = "높음" if gap > 0 else "낮음"
+        st.info(
+            f"입력한 희망가격 {asking_price:.1f}억원은 층 보정 중심가격보다 "
+            f"{abs(gap):.1f}% {direction}. 이 가격의 예상 계약기간은 **{result['asking_days']}**입니다."
+        )
+
+    st.subheader("계산 근거")
+    e1, e2, e3 = st.columns(3)
+    e1.write(f"**대상:** {selected_area}구역 {complex_name} {selected_dong}동 {ho_text}호")
+    e2.write(f"**층 위치:** {floor}층" + (f" / {total_floor}층" if total_floor else ""))
+    e3.write(f"**유사 실거래:** {result['sample_count']}건")
+
+    if result["floor_factor"] is not None:
+        st.write(f"층 보정계수: **{result['floor_factor']:.3f}** (중간층 기준 1.000)")
+    else:
+        st.write("층 보정계수: 표본 부족으로 중립값 1.000 적용")
+
+    st.caption(result["method_note"])
+    st.warning("동 위치와 조망에 따른 가격 차이는 아직 반영하지 않았습니다.")
+
+    evidence = result.get("evidence")
+    if evidence is not None and not evidence.empty:
+        st.subheader("사용된 유사 거래")
+        st.dataframe(evidence, use_container_width=True, hide_index=True)
+
+    comps = result.get("competitors")
+    if comps is not None and not comps.empty:
+        st.subheader("현재 경쟁 매물")
+        st.dataframe(comps, use_container_width=True, hide_index=True)
 
 st.divider()
-
-# =========================
-# (맨 아래) 지분당 가성비 - 전체지역/전체평형
-# =========================
-st.subheader("지분당 가성비 - 전체지역/전체평형")
-
-df_top = df_view.copy()
-df_top = df_top[df_top["지분당가격_num"].notna()].copy()
-df_top = df_top[df_top["지분당가격_num"] > 0].copy()
-
-if df_top.empty:
-    st.info("지분당 가격을 계산할 수 있는 매물이 없습니다. (가격/대지지분 값 확인 필요)")
-else:
-    df_top = df_top.sort_values(["지분당가격_num", "가격_num"], ascending=[True, True]).copy()
-
-    top_cols = ["구역", "단지명", "평형", "대지지분", "동", "층", "가격(억)", "평당 가격", "지분당 가격"]
-    top_cols = [c for c in top_cols if c in df_top.columns]
-
-    st_html_table(
-        df_top[top_cols].reset_index(drop=True),
-        default_max=10,
-        max_len_by_col={"단지명": 10, "동": 4, "평형": 6, "대지지분": 8},
-        wrapper_class="tbl-wrap-15",
-    )
+st.caption(f"자료 연결: {source_note} · 본 결과는 중개 판단을 보조하는 추정치이며 감정평가 또는 매매 보증가격이 아닙니다.")
