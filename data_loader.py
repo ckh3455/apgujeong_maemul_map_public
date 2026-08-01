@@ -9,7 +9,8 @@ from google.oauth2.service_account import Credentials
 
 
 LISTING_TAB = "매매물건 목록"
-TRADE_TAB = "거래내역"
+TRADE_SPREADSHEET_ID = "1BUye1aPLzIW1QPqCBg5V0cBsi_DGQJMjyevwfawXLz8"
+TRADE_TAB = "압구정동 거래데이터"
 UNIT_MASTER_SPREADSHEET_ID = "1QGSM-mICX9KYa5Izym6sFKVaWwO-o0j86V-KmJ-w0IM"
 UNIT_MASTER_TAB = "공동주택 공시가격"
 
@@ -96,13 +97,10 @@ def load_data():
     unit_book = client.open_by_key(_sheet_id(unit_sheet))
     units = _read_tab(unit_book, unit_tab, UNIT_COLUMNS)
 
-    trade_sheet = _secret("TRADE_SPREADSHEET_ID", listing_sheet)
+    trade_sheet = _secret("TRADE_SPREADSHEET_ID", TRADE_SPREADSHEET_ID)
     trade_tab = _secret("TRADE_TAB", TRADE_TAB)
     trade_book = client.open_by_key(_sheet_id(trade_sheet))
-    try:
-        trades = _read_tab(trade_book, trade_tab, TRADE_COLUMNS)
-    except Exception:
-        trades = pd.DataFrame()
+    trades = _read_tab(trade_book, trade_tab, TRADE_COLUMNS)
 
     source = f"{unit_tab} / {_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
     return listings, units, trades, source

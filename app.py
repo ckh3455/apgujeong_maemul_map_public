@@ -101,7 +101,8 @@ selected_sqm = selected_unit["_sqm"]
 
 p1, p2 = st.columns([1, 1])
 with p1:
-    st.text_input("자동 확인 단지·평형", value=f"{complex_name} {selected_size} · 전용 {selected_sqm:g}㎡", disabled=True)
+    st.markdown("**선택 세대 정보**")
+    st.info(f"{complex_name} · {selected_size} · 전용 {selected_sqm:g}㎡")
 with p2:
     asking_price = st.number_input("희망 매도가(억원)", min_value=0.0, max_value=500.0, value=0.0, step=0.1)
 
