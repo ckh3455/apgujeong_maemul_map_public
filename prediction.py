@@ -21,6 +21,7 @@ def normalize_text(value):
 
 
 def complex_family(value):
+    raw = str(value or "").lower()
     text = normalize_text(value)
     if "신현대" in text:
         return "신현대"
@@ -32,8 +33,20 @@ def complex_family(value):
     if "대림" in text:
         return "대림"
     if "현대" in text:
-        match = re.search(r"현대(\d+)", text)
-        return f"현대{match.group(1)}" if match else "현대"
+        # 공시가격 마스터의 통합 명칭과 국토부의 개별 차수 명칭을 연결한다.
+        if re.search(r"현대\s*1\s*[,·/]\s*2\s*차", raw):
+            return "현대1,2"
+        if re.search(r"현대\s*6\s*[,·/]\s*7\s*차", raw):
+            return "현대6,7"
+        match = re.search(r"현대(\d+)차", text)
+        if match:
+            number = int(match.group(1))
+            if number in (1, 2):
+                return "현대1,2"
+            if number in (6, 7):
+                return "현대6,7"
+            return f"현대{number}"
+        return "현대"
     return re.sub(r"\d+차.*$", "", text)
 
 
