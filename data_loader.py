@@ -71,9 +71,25 @@ def _secret(name: str, default=None):
     return os.getenv(name, default)
 
 
+def _frame_from_values(values) -> pd.DataFrame:
+    """빈/중복 헤더가 있는 시트도 고유한 임시 열 이름으로 안전하게 읽는다."""
+    if not values:
+        return pd.DataFrame()
+    raw_headers = [str(c).replace("\n", "").strip() for c in values[0]]
+    seen = {}
+    headers = []
+    for index, header in enumerate(raw_headers):
+        base = header or f"__blank_{index + 1}"
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        headers.append(base if count == 0 else f"{base}__{count + 1}")
+    width = len(headers)
+    rows = [(list(row) + [""] * width)[:width] for row in values[1:]]
+    return pd.DataFrame(rows, columns=headers)
+
+
 def _read_tab(book, tab_name: str, allow: list[str]) -> pd.DataFrame:
-    frame = pd.DataFrame(book.worksheet(tab_name).get_all_records())
-    frame.columns = [str(c).replace("\n", "").strip() for c in frame.columns]
+    frame = _frame_from_values(book.worksheet(tab_name).get_all_values())
     return frame[[c for c in allow if c in frame.columns]].copy()
 
 
