@@ -145,6 +145,27 @@ def prepare_listings(df):
     return out
 
 
+def prepare_units(df):
+    """공동주택 공시가격 탭을 구역-동-호수 기준 마스터로 정규화한다."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    for required in ["구역", "단지명", "전용면적(㎡)", "평형", "동", "호"]:
+        if required not in out.columns:
+            out[required] = ""
+    out["_area"] = out["구역"].map(normalize_area)
+    out["_complex"] = out["단지명"].map(normalize_text)
+    out["_family"] = out["단지명"].map(complex_family)
+    out["_dong"] = out["동"].map(dong_number)
+    out["_ho"] = out["호"].map(lambda x: re.sub(r"\D", "", str(x)) if pd.notna(x) else "")
+    out["_floor"] = out["_ho"].map(floor_from_ho)
+    out["_size"] = out["평형"].map(normalize_size)
+    out["_sqm"] = out["전용면적(㎡)"].map(parse_number)
+    out = out[(out["_area"] != "") & (out["_dong"] != "") & (out["_ho"] != "")].copy()
+    out["_total_floor"] = out.groupby(["_area", "_dong"])["_floor"].transform("max")
+    return out
+
+
 def prepare_trades(df, listings):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -246,7 +267,7 @@ def _days_for_gap(base_days, gap_pct):
     return f"{low}~{high}일"
 
 
-def build_prediction(listings, trades, area, complex_name, dong, size, floor, total_floor, asking_price=None):
+def build_prediction(listings, trades, area, complex_name, dong, size, floor, total_floor, asking_price=None, target_sqm=None):
     if trades is None or trades.empty:
         return {"available": False, "message": "거래내역 자료가 없어 가격을 계산할 수 없습니다."}
     adjusted = _time_adjust(trades)
@@ -262,11 +283,15 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
     if peer.empty and "_family" in adjusted.columns:
         target_family = complex_family(complex_name)
         family_rows = adjusted[adjusted["_family"] == target_family].copy()
+        if target_sqm is not None and not family_rows.empty:
+            exact_area = family_rows[(family_rows["_sqm"] - float(target_sqm)).abs() <= 0.2].copy()
+            if not exact_area.empty:
+                peer = exact_area
         listing_peer_for_map = listings[(listings["_complex"] == target_complex) & (listings["_size"] == target_size)]
         asking_median = listing_peer_for_map["_price"].dropna().median()
         recent_cut = family_rows["_date"].max() - pd.DateOffset(years=3) if not family_rows.empty else pd.NaT
         recent_family = family_rows[family_rows["_date"] >= recent_cut] if pd.notna(recent_cut) else family_rows
-        if not recent_family.empty and recent_family["_sqm"].notna().any():
+        if peer.empty and not recent_family.empty and recent_family["_sqm"].notna().any():
             recent_family["_sqm_group"] = recent_family["_sqm"].round(1)
             stats = recent_family.groupby("_sqm_group")["_adjusted_price"].median()
             if pd.notna(asking_median) and len(stats):
