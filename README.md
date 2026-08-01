@@ -1,34 +1,41 @@
-# apgujeong_maemul_map (public)
+# 압구정 매도 가능가격·기간 예측
 
-압구정 매물 지도 Streamlit 앱(공개용 템플릿)입니다.
+기존 지도 중심 앱을 구역·동·호수 입력형 매도 예측 앱으로 개편한 Streamlit 프로젝트입니다.
 
-## 핵심 동작
-- 지도 마커는 기존과 동일하게 **단지명 + 동** 단위로 표시합니다.
-- 마커 클릭 후 상단 표는 **(단지명 + 평형) 일치하는 모든 매물(동 무관)**을 **가격 오름차순**으로 출력합니다.
-- 거래내역 최신 5건도 **(단지명 + 평형) 일치** 기준으로 조회합니다.
-- 빠른 필터는 **20/30/40…평대 → 1/2/3…구역** 순으로 적용하고, 결과는 **가격 오름차순**으로 출력합니다.
+## 주요 기능
 
-## 보안(민감 컬럼 차단)
-`app.py` 상단의 Allowlist로 시트에서 읽는 컬럼을 제한합니다.
-- LISTING_ALLOW_COLUMNS / LOC_ALLOW_COLUMNS / TRADE_ALLOW_COLUMNS
-- 민감한 컬럼이 있다면 Allowlist에서 제거하세요.
+- 구역과 동을 선택하고 호수를 입력하면 층 자동 판정
+- 동일 단지·평형 거래를 최근 시점으로 환산
+- 상대층 구간을 이용한 층 가격 표준화
+- 빠른 매도·적정 매도·목표 매도가격 범위
+- 현재 경쟁 매물과 최근 완결 거래량으로 예상 계약기간 산출
+- 토지거래허가구역의 약 1개월 신고 지연 반영
+- 유사 거래, 표본 수, 신뢰도 공개
 
-## 실행 방법 (로컬)
+동 위치와 조망 프리미엄은 현재 계산하지 않으며 화면에도 미반영 사실을 명확히 표시합니다.
+
+## 필요한 Google Sheets 탭
+
+기본 파일(`SPREADSHEET_ID`):
+
+- `매매물건 목록`: 상태, 구역, 단지명, 동, 평형, 층수, 가격
+- `거래내역`: 단지명, 평형, 계약일, 거래가격, 동/호 또는 층
+
+거래자료가 별도 파일에 있으면 `TRADE_SPREADSHEET_ID`를 추가합니다.
+
+## Streamlit Secrets
+
+```toml
+SPREADSHEET_ID = "매물 시트 ID 또는 URL"
+TRADE_SPREADSHEET_ID = "거래 시트 ID 또는 URL" # 선택
+LISTING_TAB = "매매물건 목록"                  # 선택
+TRADE_TAB = "거래내역"                         # 선택
+GCP_SERVICE_ACCOUNT_JSON = '''{ ... }'''
+```
+
+## 실행
+
 ```bash
-python -m venv .venv
-# mac/linux
-source .venv/bin/activate
-# windows
-# .venv\Scripts\activate
-
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Streamlit Secrets 설정
-아래 템플릿을 참고해 `.streamlit/secrets.toml`을 구성합니다.
-
-- `SPREADSHEET_ID`: Google Spreadsheet ID (URL도 가능)
-- `GCP_SERVICE_ACCOUNT_JSON`: 서비스 계정 JSON (dict 또는 JSON string)
-
-`secrets.toml.example` 파일을 참고하세요.
