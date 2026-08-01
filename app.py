@@ -4,6 +4,7 @@ import streamlit as st
 from data_loader import load_data
 from prediction import (
     build_prediction,
+    complex_family,
     floor_from_ho,
     normalize_area,
     parse_number,
@@ -35,7 +36,7 @@ st.markdown(
     """
     <div class="hero">
       <h1>압구정 매도 가능가격·기간 예측</h1>
-      <p>구역·동·호수를 입력하면 층을 판정하고, 실거래와 현재 경쟁 매물을 이용해 매도 시나리오를 계산합니다.</p>
+      <p>구역·동·호수를 선택하고 희망 매도가를 입력하면 매도 가능가격과 예상기간을 계산합니다.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -82,38 +83,35 @@ dong_values = sorted(
 )
 with c2:
     selected_dong = st.selectbox("동", dong_values, format_func=lambda x: f"{x}동")
-with c3:
-    ho_text = st.text_input("호수", placeholder="예: 1203 또는 1203호")
-
 unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
 complex_values = sorted(unit_rows["단지명"].dropna().astype(str).unique().tolist()) if "단지명" in unit_rows else []
 complex_name = complex_values[0] if complex_values else ""
+max_trade_floor = 0
+if not trades.empty and "_family" in trades.columns and complex_values:
+    family = trades[trades["_family"] == complex_family(complex_name)]
+    if not family.empty and family["_floor"].notna().any():
+        max_trade_floor = int(family["_floor"].max())
+max_listing_floor = int(unit_rows["_floor"].dropna().max()) if unit_rows["_floor"].notna().any() else 0
+max_floor_for_units = max(max_trade_floor, max_listing_floor, 12)
+ho_values = [f"{floor_no}{line:02d}" for floor_no in range(1, max_floor_for_units + 1) for line in range(1, 16)]
+with c3:
+    selected_ho = st.selectbox("호수", ho_values, index=0, format_func=lambda x: f"{x}호")
 
-floor = floor_from_ho(ho_text)
+floor = floor_from_ho(selected_ho)
 total_floor_candidates = unit_rows["_total_floor"].dropna() if "_total_floor" in unit_rows else pd.Series(dtype=float)
 total_floor = int(total_floor_candidates.median()) if not total_floor_candidates.empty else None
 
-c4, c5, c6 = st.columns(3)
-with c4:
-    st.text_input("자동 확인 단지", value=complex_name, disabled=True)
-with c5:
-    st.text_input("자동 판정 층", value=(f"{floor}층" if floor else "호수를 입력하세요"), disabled=True)
-with c6:
-    st.text_input("확인된 최고층", value=(f"{total_floor}층" if total_floor else "자료 없음"), disabled=True)
-
-size_values = sorted(unit_rows["평형"].dropna().astype(str).unique().tolist()) if "평형" in unit_rows else []
+size_values = unit_rows["평형"].dropna().astype(str) if "평형" in unit_rows else pd.Series(dtype=str)
 p1, p2 = st.columns([1, 1])
+selected_size = size_values.mode().iloc[0] if not size_values.empty else ""
 with p1:
-    selected_size = st.selectbox("평형", size_values) if size_values else st.text_input("평형")
+    st.text_input("자동 확인 단지·평형", value=(f"{complex_name} {selected_size}" if selected_size else complex_name), disabled=True)
 with p2:
     asking_price = st.number_input("희망 매도가(억원)", min_value=0.0, max_value=500.0, value=0.0, step=0.1)
 
 run = st.button("예측 계산", type="primary", use_container_width=True)
 
 if run:
-    if not ho_text.strip() or floor is None:
-        st.error("호수를 정확히 입력해 주세요. 예: 1203")
-        st.stop()
     if not selected_size:
         st.error("평형을 선택해 주세요.")
         st.stop()
@@ -167,7 +165,7 @@ if run:
 
     st.subheader("계산 근거")
     e1, e2, e3 = st.columns(3)
-    e1.write(f"**대상:** {selected_area}구역 {complex_name} {selected_dong}동 {ho_text}호")
+    e1.write(f"**대상:** {selected_area}구역 {complex_name} {selected_dong}동 {selected_ho}호")
     e2.write(f"**층 위치:** {floor}층" + (f" / {total_floor}층" if total_floor else ""))
     e3.write(f"**유사 실거래:** {result['sample_count']}건")
 
