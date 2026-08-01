@@ -281,6 +281,14 @@ def _days_for_gap(base_days, gap_pct):
     return f"{low}~{high}일"
 
 
+def _weighted_median(values, weights):
+    frame = pd.DataFrame({"value": values, "weight": weights}).dropna().sort_values("value")
+    if frame.empty or frame["weight"].sum() <= 0:
+        return float("nan")
+    cutoff = frame["weight"].sum() / 2
+    return float(frame.loc[frame["weight"].cumsum() >= cutoff, "value"].iloc[0])
+
+
 def build_prediction(listings, trades, area, complex_name, dong, size, floor, total_floor, asking_price=None, target_sqm=None):
     if trades is None or trades.empty:
         return {"available": False, "message": "거래내역 자료가 없어 가격을 계산할 수 없습니다."}
@@ -321,17 +329,31 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
     if peer.empty:
         return {"available": False, "message": "선택한 단지·평형과 일치하는 실거래가 없어 아직 예측할 수 없습니다."}
 
-    peer["_factor"] = peer["_band"].map(factors).fillna(1.0)
-    peer["_standard_price"] = peer["_adjusted_price"] / peer["_factor"]
-    center = float(peer["_standard_price"].median() * floor_factor)
-    dispersion = float((peer["_standard_price"] / peer["_standard_price"].median() - 1).abs().median()) if len(peer) > 1 else 0.06
-    spread = min(max(dispersion, 0.025), 0.09)
+    # 동일 원본이 여러 번 적재된 경우 가격과 표본 수가 왜곡되지 않도록 제거한다.
+    peer = peer.drop_duplicates(subset=["_family", "_size", "_date", "_price", "_floor"]).copy()
 
     listing_peer = listings[(listings["_complex"] == target_complex) & (listings["_size"] == target_size)].copy()
     inventory = int(len(listing_peer))
     complete_cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=35)
     recent_start = complete_cutoff - pd.DateOffset(months=6)
-    recent = peer[(peer["_date"] >= recent_start) & (peer["_date"] <= complete_cutoff)]
+    recent = peer[(peer["_date"] >= recent_start) & (peer["_date"] <= complete_cutoff)].copy()
+    # 최근 6개월에 거래가 2건 미만일 때만 12개월까지 확장한다.
+    if len(recent) < 2:
+        recent_start = complete_cutoff - pd.DateOffset(months=12)
+        recent = peer[(peer["_date"] >= recent_start) & (peer["_date"] <= complete_cutoff)].copy()
+    if recent.empty:
+        return {"available": False, "message": "신고가 완료된 최근 12개월 동일 평형 거래가 없어 현재가격을 계산할 수 없습니다."}
+
+    # 장기 거래는 층계수에만 사용하고 현재가격은 최근 거래만 대상층으로 환산한다.
+    recent["_source_floor_factor"] = recent["_band"].map(factors).fillna(1.0)
+    recent["_target_floor_price"] = recent["_price"] / recent["_source_floor_factor"] * floor_factor
+    latest_trade_date = recent["_date"].max()
+    recent["_age_days"] = (latest_trade_date - recent["_date"]).dt.days.clip(lower=0)
+    recent["_recency_weight"] = np.exp(-recent["_age_days"] / 60.0)
+    center = _weighted_median(recent["_target_floor_price"], recent["_recency_weight"])
+    dispersion = float((recent["_target_floor_price"] / center - 1).abs().median()) if len(recent) > 1 else 0.035
+    spread = min(max(dispersion, 0.025), 0.07)
+
     monthly_sales = len(recent) / 6.0
     base_days = 180.0 if monthly_sales <= 0 else max(28.0, min(240.0, (max(inventory, 1) / monthly_sales) * 30.4))
 
@@ -345,14 +367,14 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
     asking_days = _days_for_gap(base_days, asking_gap) if asking_price else None
 
     floor_n = int((adjusted["_band"] == target_band).sum())
-    confidence = _confidence(len(peer), floor_n, len(recent))
-    evidence_cols = []
-    display = peer.sort_values("_date", ascending=False).head(10).copy()
+    confidence = _confidence(len(recent), floor_n, len(recent))
+    display = recent.sort_values("_date", ascending=False).head(15).copy()
     display["계약일"] = display["_date"].dt.strftime("%Y-%m-%d")
     display["거래가(억)"] = display["_price"].round(2)
     display["층"] = display["_floor"]
-    display["시점보정가(억)"] = display["_adjusted_price"].round(2)
-    evidence = display[["계약일", "거래가(억)", "층", "시점보정가(억)"]]
+    display["대상층환산가(억)"] = display["_target_floor_price"].round(2)
+    display["최근가중치"] = display["_recency_weight"].round(3)
+    evidence = display[["계약일", "거래가(억)", "층", "대상층환산가(억)", "최근가중치"]]
 
     comp_cols = [c for c in ["단지명", "동", "평형", "층수", "가격"] if c in listing_peer.columns]
     competitors = listing_peer[comp_cols].copy().head(30)
@@ -370,10 +392,10 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
         "asking_days": asking_days,
         "monthly_sales": monthly_sales,
         "inventory": inventory,
-        "sample_count": len(peer),
+        "sample_count": len(recent),
         "confidence": confidence,
         "floor_factor": floor_factor if target_band in factors else None,
         "evidence": evidence,
         "competitors": competitors,
-        "method_note": "동일 단지·평형 실거래를 최근 시점으로 환산한 뒤, 압구정 전체 반복거래에서 추정한 상대층 구간 계수를 적용했습니다. 최근 35일 거래는 신고 지연을 고려해 거래속도 계산에서 제외했습니다.",
+        "method_note": "현재가격은 신고가 완료된 최근 6개월 동일 단지·평형 거래만 사용합니다. 중복 거래를 제거하고 각 거래를 대상층 가격으로 환산한 뒤, 최근 거래일수록 높은 가중치를 적용했습니다. 장기 거래는 층간 격차 추정에만 사용합니다.",
     }
