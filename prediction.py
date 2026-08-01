@@ -347,15 +347,13 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
 
     listing_peer = listings[(listings["_complex"] == target_complex) & (listings["_size"] == target_size)].copy()
     inventory = int(len(listing_peer))
-    complete_cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=35)
+    # `거래내역`은 중개사가 확인해 정리한 자료이므로 신고지연 35일을 적용하지 않는다.
+    # 오늘까지 기록된 거래를 즉시 최신 기준가격에 반영한다.
+    complete_cutoff = pd.Timestamp.today().normalize()
     recent_start = complete_cutoff - pd.DateOffset(months=6)
     recent = peer[(peer["_date"] >= recent_start) & (peer["_date"] <= complete_cutoff)].copy()
-    # 최근 6개월에 거래가 2건 미만일 때만 12개월까지 확장한다.
-    if len(recent) < 2:
-        recent_start = complete_cutoff - pd.DateOffset(months=12)
-        recent = peer[(peer["_date"] >= recent_start) & (peer["_date"] <= complete_cutoff)].copy()
     if recent.empty:
-        return {"available": False, "message": "신고가 완료된 최근 12개월 동일 평형 거래가 없어 현재가격을 계산할 수 없습니다."}
+        return {"available": False, "message": "거래내역 탭의 최근 6개월에 동일 평형 거래가 없어 현재가격을 계산할 수 없습니다."}
 
     # 장기 거래는 층계수에만 사용하고 현재가격은 최근 거래만 대상층으로 환산한다.
     recent["_source_floor_factor"] = recent["_band"].map(factors).fillna(1.0)
@@ -410,5 +408,5 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
         "floor_factor": floor_factor if target_band in factors else None,
         "evidence": evidence,
         "competitors": competitors,
-        "method_note": "현재가격은 신고가 완료된 최근 6개월 동일 단지·평형 거래만 사용합니다. 중복 거래를 제거하고 각 거래를 대상층 가격으로 환산한 뒤, 최근 거래일수록 높은 가중치를 적용했습니다. 장기 거래는 층간 격차 추정에만 사용합니다.",
+        "method_note": "현재가격은 거래내역 탭에 기록된 최근 6개월 동일 단지·평형 거래를 즉시 사용합니다. 중복 거래를 제거하고 각 거래를 대상층 가격으로 환산한 뒤, 최근 거래일수록 높은 가중치를 적용했습니다. 장기 거래는 층간 격차 추정에만 사용합니다.",
     }
