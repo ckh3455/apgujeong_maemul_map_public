@@ -10,6 +10,7 @@ from prediction import (
     parse_number,
     prepare_listings,
     prepare_trades,
+    prepare_units,
 )
 
 
@@ -53,51 +54,25 @@ with st.expander("계산 기준과 제한사항", expanded=False):
     )
 
 try:
-    raw_listings, raw_locations, raw_trades, source_note = load_data()
+    raw_listings, raw_units, raw_trades, source_note = load_data()
 except Exception as exc:
     st.error("데이터를 불러오지 못했습니다. Streamlit Secrets와 시트 이름을 확인해 주세요.")
     st.exception(exc)
     st.stop()
 
 listings = prepare_listings(raw_listings)
-locations = prepare_listings(raw_locations)
+units = prepare_units(raw_units)
 trades = prepare_trades(raw_trades, listings)
 
-# 위치정보 탭에는 동 좌표만 있고 구역이 비어 있을 수 있다. 단지명/단지군을
-# 매물장과 연결해 구역을 채운 후, 활성 매물 유무와 관계없이 전체 동 목록을 만든다.
-if not locations.empty:
-    complex_area = (
-        listings[listings["_area"].astype(str).str.len() > 0]
-        .groupby("_complex")["_area"]
-        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "")
-        .to_dict()
-    )
-    family_area = (
-        listings[listings["_area"].astype(str).str.len() > 0]
-        .groupby("_family")["_area"]
-        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "")
-        .to_dict()
-    )
-    missing_area = locations["_area"].astype(str).str.len() == 0
-    locations.loc[missing_area, "_area"] = locations.loc[missing_area].apply(
-        lambda r: complex_area.get(r["_complex"], family_area.get(r["_family"], "")), axis=1
-    )
-
-if listings.empty:
-    st.warning("입력에 사용할 매물 자료가 없습니다.")
+if units.empty:
+    st.warning("공동주택 공시가격 탭에서 구역·동·호수 자료를 읽지 못했습니다.")
     st.stop()
 
 st.subheader("1. 물건 입력")
 c1, c2, c3 = st.columns(3)
 
 master_columns = ["_area", "_dong", "_complex", "_family", "단지명"]
-input_master = pd.concat(
-    [locations[master_columns], listings[master_columns]], ignore_index=True
-).drop_duplicates(subset=["_area", "_dong", "_complex"])
-input_master = input_master[
-    (input_master["_area"].astype(str).str.len() > 0)
-    & (input_master["_dong"].astype(str).str.len() > 0)
-].copy()
+input_master = units
 area_values = sorted(
     [x for x in input_master["_area"].dropna().astype(str).unique() if x],
     key=lambda x: int(x) if x.isdigit() else 999,
@@ -112,32 +87,21 @@ dong_values = sorted(
 )
 with c2:
     selected_dong = st.selectbox("동", dong_values, format_func=lambda x: f"{x}동")
-master_unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
-complex_values = sorted(master_unit_rows["단지명"].dropna().astype(str).unique().tolist()) if "단지명" in master_unit_rows else []
-complex_name = complex_values[0] if complex_values else ""
-unit_rows = listings[(listings["_dong"] == selected_dong) & (listings["_area"] == selected_area)].copy()
-if complex_name and unit_rows.empty:
-    unit_rows = listings[listings["_family"] == complex_family(complex_name)].copy()
-max_trade_floor = 0
-if not trades.empty and "_family" in trades.columns and complex_values:
-    family = trades[trades["_family"] == complex_family(complex_name)]
-    if not family.empty and family["_floor"].notna().any():
-        max_trade_floor = int(family["_floor"].max())
-max_listing_floor = int(unit_rows["_floor"].dropna().max()) if unit_rows["_floor"].notna().any() else 0
-max_floor_for_units = max(max_trade_floor, max_listing_floor, 12)
-ho_values = [f"{floor_no}{line:02d}" for floor_no in range(1, max_floor_for_units + 1) for line in range(1, 16)]
+unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
+ho_values = sorted(unit_rows["_ho"].dropna().astype(str).unique().tolist(), key=lambda x: int(x))
 with c3:
     selected_ho = st.selectbox("호수", ho_values, index=0, format_func=lambda x: f"{x}호")
 
-floor = floor_from_ho(selected_ho)
-total_floor_candidates = unit_rows["_total_floor"].dropna() if "_total_floor" in unit_rows else pd.Series(dtype=float)
-total_floor = int(total_floor_candidates.median()) if not total_floor_candidates.empty else None
+selected_unit = unit_rows[unit_rows["_ho"] == selected_ho].iloc[0]
+complex_name = str(selected_unit["단지명"])
+selected_size = f"{parse_number(selected_unit['평형']):g}평" if parse_number(selected_unit["평형"]) is not None else str(selected_unit["평형"])
+floor = int(selected_unit["_floor"])
+total_floor = int(selected_unit["_total_floor"])
+selected_sqm = selected_unit["_sqm"]
 
-size_values = unit_rows["평형"].dropna().astype(str) if "평형" in unit_rows else pd.Series(dtype=str)
 p1, p2 = st.columns([1, 1])
-selected_size = size_values.mode().iloc[0] if not size_values.empty else ""
 with p1:
-    st.text_input("자동 확인 단지·평형", value=(f"{complex_name} {selected_size}" if selected_size else complex_name), disabled=True)
+    st.text_input("자동 확인 단지·평형", value=f"{complex_name} {selected_size} · 전용 {selected_sqm:g}㎡", disabled=True)
 with p2:
     asking_price = st.number_input("희망 매도가(억원)", min_value=0.0, max_value=500.0, value=0.0, step=0.1)
 
@@ -158,6 +122,7 @@ if run:
         floor=floor,
         total_floor=total_floor,
         asking_price=(asking_price if asking_price > 0 else None),
+        target_sqm=selected_sqm,
     )
 
     st.divider()
