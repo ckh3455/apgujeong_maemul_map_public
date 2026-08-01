@@ -9,11 +9,12 @@ from google.oauth2.service_account import Credentials
 
 
 LISTING_TAB = "매매물건 목록"
-LOCATION_TAB = "압구정 위치정보"
 TRADE_TAB = "거래내역"
+UNIT_MASTER_SPREADSHEET_ID = "1QGSM-mICX9KYa5Izym6sFKVaWwO-o0j86V-KmJ-w0IM"
+UNIT_MASTER_TAB = "공동주택 공시가격"
 
 LISTING_COLUMNS = ["상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격"]
-LOCATION_COLUMNS = ["구역", "단지명", "동"]
+UNIT_COLUMNS = ["구역", "주소", "단지명", "전용면적(㎡)", "대지지분(평)", "특기사항", "평형", "동", "호"]
 TRADE_COLUMNS = [
     "구역", "단지", "단지명", "단지명(단지)", "평형", "평형대", "전용면적",
     "날짜", "거래일", "계약일", "일자", "거래일자", "계약년월", "계약일자",
@@ -90,7 +91,10 @@ def load_data():
     client = gspread.authorize(credentials)
     listing_book = client.open_by_key(_sheet_id(listing_sheet))
     listings = _read_tab(listing_book, _secret("LISTING_TAB", LISTING_TAB), LISTING_COLUMNS)
-    locations = _read_tab(listing_book, _secret("LOCATION_TAB", LOCATION_TAB), LOCATION_COLUMNS)
+    unit_sheet = _secret("UNIT_MASTER_SPREADSHEET_ID", UNIT_MASTER_SPREADSHEET_ID)
+    unit_tab = _secret("UNIT_MASTER_TAB", UNIT_MASTER_TAB)
+    unit_book = client.open_by_key(_sheet_id(unit_sheet))
+    units = _read_tab(unit_book, unit_tab, UNIT_COLUMNS)
 
     trade_sheet = _secret("TRADE_SPREADSHEET_ID", listing_sheet)
     trade_tab = _secret("TRADE_TAB", TRADE_TAB)
@@ -100,5 +104,5 @@ def load_data():
     except Exception:
         trades = pd.DataFrame()
 
-    source = f"{_secret('LOCATION_TAB', LOCATION_TAB)} / {_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
-    return listings, locations, trades, source
+    source = f"{unit_tab} / {_secret('LISTING_TAB', LISTING_TAB)} / {trade_tab}"
+    return listings, units, trades, source
