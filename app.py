@@ -53,13 +53,14 @@ with st.expander("계산 기준과 제한사항", expanded=False):
     )
 
 try:
-    raw_listings, raw_trades, source_note = load_data()
+    raw_listings, raw_locations, raw_trades, source_note = load_data()
 except Exception as exc:
     st.error("데이터를 불러오지 못했습니다. Streamlit Secrets와 시트 이름을 확인해 주세요.")
     st.exception(exc)
     st.stop()
 
 listings = prepare_listings(raw_listings)
+locations = prepare_listings(raw_locations)
 trades = prepare_trades(raw_trades, listings)
 
 if listings.empty:
@@ -69,23 +70,27 @@ if listings.empty:
 st.subheader("1. 물건 입력")
 c1, c2, c3 = st.columns(3)
 
+input_master = locations if not locations.empty else listings
 area_values = sorted(
-    [x for x in listings["_area"].dropna().astype(str).unique() if x],
+    [x for x in input_master["_area"].dropna().astype(str).unique() if x],
     key=lambda x: int(x) if x.isdigit() else 999,
 )
 with c1:
     selected_area = st.selectbox("구역", area_values, format_func=lambda x: f"{x}구역")
 
-area_rows = listings[listings["_area"] == selected_area].copy()
+area_rows = input_master[input_master["_area"] == selected_area].copy()
 dong_values = sorted(
     [x for x in area_rows["_dong"].dropna().astype(str).unique() if x],
     key=lambda x: int(x) if x.isdigit() else 9999,
 )
 with c2:
     selected_dong = st.selectbox("동", dong_values, format_func=lambda x: f"{x}동")
-unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
-complex_values = sorted(unit_rows["단지명"].dropna().astype(str).unique().tolist()) if "단지명" in unit_rows else []
+master_unit_rows = area_rows[area_rows["_dong"] == selected_dong].copy()
+complex_values = sorted(master_unit_rows["단지명"].dropna().astype(str).unique().tolist()) if "단지명" in master_unit_rows else []
 complex_name = complex_values[0] if complex_values else ""
+unit_rows = listings[(listings["_dong"] == selected_dong) & (listings["_area"] == selected_area)].copy()
+if complex_name and unit_rows.empty:
+    unit_rows = listings[listings["_family"] == complex_family(complex_name)].copy()
 max_trade_floor = 0
 if not trades.empty and "_family" in trades.columns and complex_values:
     family = trades[trades["_family"] == complex_family(complex_name)]
