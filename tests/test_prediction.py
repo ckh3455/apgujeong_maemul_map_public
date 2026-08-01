@@ -1,6 +1,6 @@
 import pandas as pd
 
-from data_loader import _parse_service_account
+from data_loader import _frame_from_values, _parse_service_account
 from prediction import complex_family, floor_band, floor_from_ho, normalize_area, price_eok
 
 
@@ -36,3 +36,12 @@ def test_hyundai_integrated_complex_aliases():
     assert complex_family("현대6,7차") == "현대6,7"
     assert complex_family("현대7차") == "현대6,7"
     assert complex_family("현대12차") == "현대12"
+
+
+def test_duplicate_and_blank_sheet_headers():
+    frame = _frame_from_values([
+        ["날짜", "단지", "", "", "가격", "가격"],
+        ["2026.06.04", "신현대", "", "", "61", "보조값"],
+    ])
+    assert list(frame.columns) == ["날짜", "단지", "__blank_3", "__blank_4", "가격", "가격__2"]
+    assert frame.loc[0, "가격"] == "61"
