@@ -166,7 +166,7 @@ def prepare_units(df):
     return out
 
 
-def prepare_trades(df, listings):
+def prepare_trades(df, listings, units=None):
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
@@ -181,6 +181,20 @@ def prepare_trades(df, listings):
     out["_family"] = out[complex_col].map(complex_family)
     out["_size"] = out[size_col].map(normalize_size)
     out["_sqm"] = out[size_col].map(parse_number)
+    # 국토부 전용면적을 공시가격 마스터의 공식 평형명으로 변환한다.
+    # 예: 신현대 + 108.88㎡ -> 신현대 35평
+    if units is not None and not units.empty:
+        unit_map = units.dropna(subset=["_sqm"]).copy()
+        unit_map["_sqm_key"] = unit_map["_sqm"].round(2)
+        size_map = (
+            unit_map.groupby(["_family", "_sqm_key"])["_size"]
+            .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+            .to_dict()
+        )
+        out["_size"] = [
+            size_map.get((family, round(sqm, 2)), old_size) if pd.notna(sqm) else old_size
+            for family, sqm, old_size in zip(out["_family"], out["_sqm"], out["_size"])
+        ]
     if split_date:
         out["_date"] = pd.to_datetime(
             dict(
@@ -283,9 +297,12 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
     if peer.empty and "_family" in adjusted.columns:
         target_family = complex_family(complex_name)
         family_rows = adjusted[adjusted["_family"] == target_family].copy()
+        official_size_rows = family_rows[family_rows["_size"] == target_size].copy()
+        if not official_size_rows.empty:
+            peer = official_size_rows
         if target_sqm is not None and not family_rows.empty:
             exact_area = family_rows[(family_rows["_sqm"] - float(target_sqm)).abs() <= 0.2].copy()
-            if not exact_area.empty:
+            if peer.empty and not exact_area.empty:
                 peer = exact_area
         listing_peer_for_map = listings[(listings["_complex"] == target_complex) & (listings["_size"] == target_size)]
         asking_median = listing_peer_for_map["_price"].dropna().median()
