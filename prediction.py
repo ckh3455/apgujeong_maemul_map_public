@@ -20,6 +20,23 @@ def normalize_text(value):
     return re.sub(r"[\s(){}\[\]\-_/·.,]", "", text)
 
 
+def complex_family(value):
+    text = normalize_text(value)
+    if "신현대" in text:
+        return "신현대"
+    if "미성" in text:
+        match = re.search(r"미성(1|2)", text)
+        return f"미성{match.group(1)}" if match else "미성"
+    if "한양" in text:
+        return "한양"
+    if "대림" in text:
+        return "대림"
+    if "현대" in text:
+        match = re.search(r"현대(\d+)", text)
+        return f"현대{match.group(1)}" if match else "현대"
+    return re.sub(r"\d+차.*$", "", text)
+
+
 def normalize_size(value):
     text = str(value or "").lower().replace("평", "").replace("㎡", "").replace("m²", "").replace("m2", "")
     match = re.search(r"\d+(?:\.\d+)?", text)
@@ -118,6 +135,7 @@ def prepare_listings(df):
         out = out[(active == "") | (active == "활성")].copy()
     out["_area"] = out["구역"].map(normalize_area)
     out["_complex"] = out["단지명"].map(normalize_text)
+    out["_family"] = out["단지명"].map(complex_family)
     out["_dong"] = out["동"].map(dong_number)
     out["_size"] = out["평형"].map(normalize_size)
     out["_price"] = out["가격"].map(price_eok)
@@ -132,14 +150,27 @@ def prepare_trades(df, listings):
         return pd.DataFrame()
     out = df.copy()
     complex_col = first_column(out, ["단지", "단지명", "단지명(단지)"])
-    size_col = first_column(out, ["평형", "평형대", "전용면적"])
-    date_col = first_column(out, ["계약일", "거래일", "날짜", "일자", "거래일자", "계약일자"])
-    price_col = first_column(out, ["거래가격", "거래가", "실거래가", "거래금액", "금액", "가격"])
-    if not all([complex_col, size_col, date_col, price_col]):
+    size_col = first_column(out, ["평형", "평형대", "전용면적", "전용면적(㎡)"])
+    date_col = first_column(out, ["거래일", "날짜", "일자", "거래일자", "계약일자"])
+    price_col = first_column(out, ["거래가격", "거래가", "실거래가", "거래금액", "거래금액(만원)", "금액", "가격"])
+    split_date = all(c in out.columns for c in ["계약년", "계약월", "계약일"])
+    if not all([complex_col, size_col, price_col]) or (not date_col and not split_date):
         return pd.DataFrame()
     out["_complex"] = out[complex_col].map(normalize_text)
+    out["_family"] = out[complex_col].map(complex_family)
     out["_size"] = out[size_col].map(normalize_size)
-    out["_date"] = out[date_col].map(parse_date)
+    out["_sqm"] = out[size_col].map(parse_number)
+    if split_date:
+        out["_date"] = pd.to_datetime(
+            dict(
+                year=pd.to_numeric(out["계약년"], errors="coerce"),
+                month=pd.to_numeric(out["계약월"], errors="coerce"),
+                day=pd.to_numeric(out["계약일"], errors="coerce"),
+            ),
+            errors="coerce",
+        )
+    else:
+        out["_date"] = out[date_col].map(parse_date)
     out["_price"] = out[price_col].map(price_eok)
     out["_dong"] = out["동"].map(dong_number) if "동" in out else ""
     if "층" in out:
@@ -148,8 +179,9 @@ def prepare_trades(df, listings):
         out["_floor"] = out["호"].map(floor_from_ho)
     else:
         out["_floor"] = None
-    if "해제여부" in out:
-        cancelled = out["해제여부"].astype(str).str.contains("해제|취소", na=False)
+    cancel_col = first_column(out, ["해제여부", "해제사유발생일"])
+    if cancel_col:
+        cancelled = ~out[cancel_col].astype(str).str.strip().isin(["", "-", "nan", "None"])
         out = out[~cancelled].copy()
     out = out[out["_date"].notna() & out["_price"].notna() & (out["_price"] > 0)].copy()
 
@@ -225,6 +257,25 @@ def build_prediction(listings, trades, area, complex_name, dong, size, floor, to
     floor_factor = factors.get(target_band, 1.0)
 
     peer = adjusted[(adjusted["_complex"] == target_complex) & (adjusted["_size"] == target_size)].copy()
+    # 국토부 원본은 평형 대신 전용면적을 제공한다. 이름/평형 직접 일치가 없으면
+    # 동일 단지군의 전용면적 묶음 중 현재 매물 호가와 가장 가까운 묶음을 선택한다.
+    if peer.empty and "_family" in adjusted.columns:
+        target_family = complex_family(complex_name)
+        family_rows = adjusted[adjusted["_family"] == target_family].copy()
+        listing_peer_for_map = listings[(listings["_complex"] == target_complex) & (listings["_size"] == target_size)]
+        asking_median = listing_peer_for_map["_price"].dropna().median()
+        recent_cut = family_rows["_date"].max() - pd.DateOffset(years=3) if not family_rows.empty else pd.NaT
+        recent_family = family_rows[family_rows["_date"] >= recent_cut] if pd.notna(recent_cut) else family_rows
+        if not recent_family.empty and recent_family["_sqm"].notna().any():
+            recent_family["_sqm_group"] = recent_family["_sqm"].round(1)
+            stats = recent_family.groupby("_sqm_group")["_adjusted_price"].median()
+            if pd.notna(asking_median) and len(stats):
+                chosen_sqm = (stats - asking_median).abs().idxmin()
+            else:
+                pnum = parse_number(size) or 0
+                ordered = sorted(stats.index)
+                chosen_sqm = min(ordered, key=lambda x: abs(x * 0.32 - pnum))
+            peer = family_rows[(family_rows["_sqm"].round(1) - chosen_sqm).abs() <= 0.2].copy()
     if peer.empty:
         return {"available": False, "message": "선택한 단지·평형과 일치하는 실거래가 없어 아직 예측할 수 없습니다."}
 
