@@ -25,15 +25,39 @@ def _sheet_id(value: str) -> str:
     return match.group(1) if match else str(value).strip()
 
 
+def _repair_private_key_json(raw: str) -> str:
+    """JSON 문자열 안 private_key의 실제 줄바꿈만 JSON용 \\n으로 복구한다."""
+    text = raw.strip()
+    marker = re.search(r'"private_key"\s*:\s*"', text)
+    if not marker:
+        return text
+    start = marker.end()
+    end_match = re.search(r'"\s*,\s*"(?:client_email|client_id|auth_uri)"\s*:', text[start:])
+    if not end_match:
+        return text
+    end = start + end_match.start()
+    private_key = text[start:end]
+    private_key = private_key.replace("\r\n", "\n").replace("\r", "\n")
+    private_key = private_key.replace("\n", "\\n")
+    return text[:start] + private_key + text[end:]
+
+
+def _parse_service_account(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    raw = str(value).strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return json.loads(_repair_private_key_json(raw))
+
+
 def _service_account() -> dict:
     if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
-        value = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
-        if isinstance(value, dict):
-            return dict(value)
-        return json.loads(str(value).replace("\\n", "\n"))
+        return _parse_service_account(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     env = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
     if env:
-        return json.loads(env)
+        return _parse_service_account(env)
     raise RuntimeError("GCP_SERVICE_ACCOUNT_JSON이 없습니다.")
 
 
