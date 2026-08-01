@@ -1,7 +1,7 @@
 import pandas as pd
 
 from data_loader import _parse_service_account
-from prediction import floor_band, floor_from_ho, normalize_area, price_eok
+from prediction import complex_family, floor_band, floor_from_ho, normalize_area, price_eok
 
 
 def test_floor_from_ho():
@@ -27,3 +27,12 @@ def test_service_account_private_key_newlines():
     parsed = _parse_service_account(raw)
     assert parsed["client_email"] == "test@example.com"
     assert "\nABC\n" in parsed["private_key"]
+
+
+def test_hyundai_integrated_complex_aliases():
+    assert complex_family("현대1,2차") == "현대1,2"
+    assert complex_family("현대1차(12,13,21,22,31,32,33동)") == "현대1,2"
+    assert complex_family("현대2차") == "현대1,2"
+    assert complex_family("현대6,7차") == "현대6,7"
+    assert complex_family("현대7차") == "현대6,7"
+    assert complex_family("현대12차") == "현대12"
