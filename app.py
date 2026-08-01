@@ -62,7 +62,7 @@ except Exception as exc:
 
 listings = prepare_listings(raw_listings)
 units = prepare_units(raw_units)
-trades = prepare_trades(raw_trades, listings)
+trades = prepare_trades(raw_trades, listings, units)
 
 if units.empty:
     st.warning("공동주택 공시가격 탭에서 구역·동·호수 자료를 읽지 못했습니다.")
@@ -102,7 +102,7 @@ selected_sqm = selected_unit["_sqm"]
 p1, p2 = st.columns([1, 1])
 with p1:
     st.markdown("**선택 세대 정보**")
-    st.info(f"{complex_name} · {selected_size} · 전용 {selected_sqm:g}㎡")
+    st.info(f"{complex_name} {selected_size}")
 with p2:
     asking_price = st.number_input("희망 매도가(억원)", min_value=0.0, max_value=500.0, value=0.0, step=0.1)
 
