@@ -63,6 +63,26 @@ listings = prepare_listings(raw_listings)
 locations = prepare_listings(raw_locations)
 trades = prepare_trades(raw_trades, listings)
 
+# 위치정보 탭에는 동 좌표만 있고 구역이 비어 있을 수 있다. 단지명/단지군을
+# 매물장과 연결해 구역을 채운 후, 활성 매물 유무와 관계없이 전체 동 목록을 만든다.
+if not locations.empty:
+    complex_area = (
+        listings[listings["_area"].astype(str).str.len() > 0]
+        .groupby("_complex")["_area"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "")
+        .to_dict()
+    )
+    family_area = (
+        listings[listings["_area"].astype(str).str.len() > 0]
+        .groupby("_family")["_area"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "")
+        .to_dict()
+    )
+    missing_area = locations["_area"].astype(str).str.len() == 0
+    locations.loc[missing_area, "_area"] = locations.loc[missing_area].apply(
+        lambda r: complex_area.get(r["_complex"], family_area.get(r["_family"], "")), axis=1
+    )
+
 if listings.empty:
     st.warning("입력에 사용할 매물 자료가 없습니다.")
     st.stop()
@@ -70,7 +90,14 @@ if listings.empty:
 st.subheader("1. 물건 입력")
 c1, c2, c3 = st.columns(3)
 
-input_master = locations if not locations.empty else listings
+master_columns = ["_area", "_dong", "_complex", "_family", "단지명"]
+input_master = pd.concat(
+    [locations[master_columns], listings[master_columns]], ignore_index=True
+).drop_duplicates(subset=["_area", "_dong", "_complex"])
+input_master = input_master[
+    (input_master["_area"].astype(str).str.len() > 0)
+    & (input_master["_dong"].astype(str).str.len() > 0)
+].copy()
 area_values = sorted(
     [x for x in input_master["_area"].dropna().astype(str).unique() if x],
     key=lambda x: int(x) if x.isdigit() else 999,
