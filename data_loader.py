@@ -13,7 +13,7 @@ TRADE_TAB = "거래내역"
 UNIT_MASTER_SPREADSHEET_ID = "1QGSM-mICX9KYa5Izym6sFKVaWwO-o0j86V-KmJ-w0IM"
 UNIT_MASTER_TAB = "공동주택 공시가격"
 
-LISTING_COLUMNS = ["상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격"]
+LISTING_COLUMNS = ["상태", "구역", "단지명", "동", "평형", "평형대", "대지지분", "층수", "가격", "가격이력"]
 UNIT_COLUMNS = ["구역", "주소", "단지명", "전용면적(㎡)", "대지지분(평)", "특기사항", "평형", "동", "호"]
 TRADE_COLUMNS = [
     "구역", "단지", "단지명", "단지명(단지)", "평형", "평형대", "전용면적",
