@@ -7,8 +7,6 @@ from prediction import (
     complex_family,
     floor_from_ho,
     normalize_area,
-    normalize_size,
-    normalize_text,
     parse_number,
     prepare_listings,
     prepare_trades,
@@ -182,38 +180,10 @@ if run:
         st.subheader("사용된 유사 거래")
         st.dataframe(evidence, use_container_width=True, hide_index=True)
 
-    # 경쟁 매물은 원본 매매물건 목록에서 다시 구성해 가격 오름차순을 확실히 유지한다.
-    target_complex = normalize_text(complex_name)
-    target_size = normalize_size(selected_size)
-    comps = listings[
-        (listings["_complex"] == target_complex)
-        & (listings["_size"] == target_size)
-    ].copy()
-    comps = comps.sort_values("_price", ascending=True, na_position="last")
-
-    comp_cols = [
-        c for c in ["단지명", "동", "평형", "층수", "가격", "가격이력"]
-        if c in comps.columns
-    ]
-    comps = comps[comp_cols].head(30).copy()
-    if "가격이력" in comps.columns:
-        comps = comps.rename(columns={"가격이력": "가격변동"})
-
+    comps = result.get("competitors")
     if comps is not None and not comps.empty:
         st.subheader("현재 경쟁 매물")
-        column_config = {}
-        if "가격변동" in comps.columns:
-            column_config["가격변동"] = st.column_config.TextColumn(
-                "가격변동",
-                help="매매물건 목록에서 기록된 가격 변경 이력입니다. 최근 변경부터 표시됩니다.",
-                width="large",
-            )
-        st.dataframe(
-            comps,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config,
-        )
+        st.dataframe(comps, use_container_width=True, hide_index=True)
 
 st.divider()
 st.caption(f"자료 연결: {source_note} · 본 결과는 중개 판단을 보조하는 추정치이며 감정평가 또는 매매 보증가격이 아닙니다.")
