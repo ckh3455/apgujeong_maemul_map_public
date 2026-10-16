@@ -1,3 +1,7 @@
+from moved_notice import show_moved_notice as _apg_show_moved_notice
+
+_apg_show_moved_notice()
+
 import pandas as pd
 import streamlit as st
 
